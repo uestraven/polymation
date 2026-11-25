@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint, test and render
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the pinned Python
+        # Reads .python-version, so CI uses exactly the pinned interpreter.
+        run: uv python install
+
+      - name: Report the Python version in use
+        run: uv run python -VV
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install project dependencies
+        # --frozen when a lockfile is committed, so CI installs exactly the
+        # locked versions; falls back to resolving when it is not.
+        run: |
+          if [ -f uv.lock ]; then
+            uv sync --frozen --extra dev
+          else
+            echo "::warning title=No lockfile::uv.lock is absent; resolving dependencies instead of installing locked versions."
+            uv sync --extra dev
+          fi
+
+      - name: Environment diagnostics
+        run: uv run polymation doctor
+
+      - name: Ruff lint
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Tests
+        # -m ffmpeg must actually run here: a skip would mean the rendering
+        # acceptance criteria are unverified.
+        run: uv run pytest -v --junitxml=pytest-report.xml
+
+      - name: Fail if any FFmpeg integration test was skipped
+        run: |
+          python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          suite = ET.parse("pytest-report.xml").getroot()
+          skipped = [
+              case.get("name")
+              for case in suite.iter("testcase")
+              if case.find("skipped") is not None
+              and "ffmpeg" in (case.get("classname") or "") + (case.get("name") or "")
+          ]
+          if skipped:
+              print("FFmpeg integration tests were skipped in CI:", *skipped, sep="\n  ")
+              sys.exit(1)
+          print("No FFmpeg integration tests were skipped.")
+          PY
+
+      - name: Build the technical demonstration
+        run: uv run polymation demo create --recreate
+
+      - name: Render the technical demonstration
+        run: uv run polymation demo render --overwrite
+
+      - name: Inspect the rendered media with ffprobe
+        run: |
+          OUTPUT=projects/demo-technical-fixture/output/demo-technical-fixture.mp4
+          test -s "$OUTPUT" || { echo "::error::$OUTPUT is missing or empty"; exit 1; }
+          ffprobe -v error -hide_banner -print_format json -show_format -show_streams "$OUTPUT"
+
+      - name: Assert the output matches the M0.1 specification
+        run: |
+          OUTPUT=projects/demo-technical-fixture/output/demo-technical-fixture.mp4
+          read -r WIDTH HEIGHT RATE VCODEC <<<"$(ffprobe -v error -select_streams v:0 \
+            -show_entries stream=width,height,r_frame_rate,codec_name \
+            -of default=nw=1:nk=1 "$OUTPUT" | tr '\n' ' ')"
+          read -r ACODEC ARATE <<<"$(ffprobe -v error -select_streams a:0 \
+            -show_entries stream=codec_name,sample_rate \
+            -of default=nw=1:nk=1 "$OUTPUT" | tr '\n' ' ')"
+          DURATION=$(ffprobe -v error -show_entries format=duration \
+            -of default=nw=1:nk=1 "$OUTPUT")
+
+          echo "resolution=${WIDTH}x${HEIGHT} fps=${RATE} video=${VCODEC}"
+          echo "audio=${ACODEC} sample_rate=${ARATE} duration=${DURATION}"
+
+          FAILED=0
+          [ "$WIDTH"  = "1920" ]  || { echo "::error::width is $WIDTH, expected 1920"; FAILED=1; }
+          [ "$HEIGHT" = "1080" ]  || { echo "::error::height is $HEIGHT, expected 1080"; FAILED=1; }
+          [ "$RATE"   = "30/1" ]  || { echo "::error::frame rate is $RATE, expected 30/1"; FAILED=1; }
+          [ "$VCODEC" = "h264" ]  || { echo "::error::video codec is $VCODEC, expected h264"; FAILED=1; }
+          [ "$ACODEC" = "aac" ]   || { echo "::error::audio codec is $ACODEC, expected aac"; FAILED=1; }
+          [ "$ARATE"  = "48000" ] || { echo "::error::sample rate is $ARATE, expected 48000"; FAILED=1; }
+          awk -v d="$DURATION" 'BEGIN { exit !(d > 14.5 && d < 15.5) }' \
+            || { echo "::error::duration is ${DURATION}s, expected about 15s"; FAILED=1; }
+          exit $FAILED
+
+      - name: Validate the demonstration project
+        run: uv run polymation validate demo-technical-fixture --json
+
+      - name: Upload the rendered demonstration
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: technical-demonstration
+          path: |
+            projects/demo-technical-fixture/output/*.mp4
+            pytest-report.xml
+          if-no-files-found: warn
+          retention-days: 14
