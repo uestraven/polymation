@@ -21,6 +21,7 @@ from polymation.config.channel import ChannelBrand
 from polymation.errors import NotRenderReadyError, RenderError
 from polymation.projects.store import ProjectBundle
 from polymation.rendering.ffmpeg import ToolInfo, ffprobe_json, require_ffmpeg, run_tool
+from polymation.rendering.profiles import FINAL_PROFILE, RenderProfile
 from polymation.schemas.assets import AssetType
 from polymation.schemas.storyboard import FitMode, VisualShot
 from polymation.validation.validator import RenderReadiness, assess_render_readiness
@@ -68,6 +69,7 @@ class OutputInspection:
     width: int | None
     height: int | None
     frame_rate: float | None
+    pixel_format: str | None
     duration_seconds: float | None
     video_codec: str | None
     audio_codec: str | None
@@ -88,6 +90,7 @@ class OutputInspection:
             "width": self.width,
             "height": self.height,
             "frame_rate": self.frame_rate,
+            "pixel_format": self.pixel_format,
             "duration_seconds": self.duration_seconds,
             "video_codec": self.video_codec,
             "audio_codec": self.audio_codec,
@@ -329,14 +332,26 @@ def inspect_output(
     expected_duration_seconds: float | None = None,
     duration_tolerance_seconds: float = 0.5,
     require_audio: bool = True,
+    profile: RenderProfile | None = None,
 ) -> OutputInspection:
-    """Inspect a rendered file with ffprobe and check it against the M0.1 spec.
+    """Inspect a rendered file with ffprobe and check it against a profile.
+
+    Args:
+        path: the rendered file.
+        expected_duration_seconds: when given, the duration is checked against
+            it within ``duration_tolerance_seconds``.
+        duration_tolerance_seconds: permitted duration drift.
+        require_audio: check the audio stream. False for a deliberately silent
+            render.
+        profile: the profile to check against. Defaults to the final profile,
+            which is what M0.1 produced, so existing callers keep their meaning.
 
     Raises:
         RenderError: if the file does not exist.
         MissingDependencyError: if ffprobe is unavailable.
         ValueError: if ffprobe cannot describe the file.
     """
+    expected = profile or FINAL_PROFILE
     if not path.is_file():
         raise RenderError(f"{path} does not exist, so it cannot be inspected.")
 
@@ -367,26 +382,29 @@ def inspect_output(
     height = _as_int(video.get("height")) if video else None
     frame_rate = _parse_rate(video.get("r_frame_rate")) if video else None
     video_codec = str(video.get("codec_name")) if video else None
+    pixel_format = str(video.get("pix_fmt")) if video and video.get("pix_fmt") else None
     audio_codec = str(audio.get("codec_name")) if audio else None
     audio_sample_rate = _as_int(audio.get("sample_rate")) if audio else None
     audio_channels = _as_int(audio.get("channels")) if audio else None
     duration = _as_float(container.get("duration"))
 
     deviations: list[str] = []
-    if width != OUTPUT_WIDTH or height != OUTPUT_HEIGHT:
+    if width != expected.width or height != expected.height:
         deviations.append(
-            f"resolution is {width}x{height}, expected {OUTPUT_WIDTH}x{OUTPUT_HEIGHT}"
+            f"resolution is {width}x{height}, expected {expected.width}x{expected.height}"
         )
-    if frame_rate is None or abs(frame_rate - OUTPUT_FPS) > 0.01:
-        deviations.append(f"frame rate is {frame_rate}, expected {OUTPUT_FPS}")
+    if frame_rate is None or abs(frame_rate - expected.fps) > 0.01:
+        deviations.append(f"frame rate is {frame_rate}, expected {expected.fps}")
     if video_codec != OUTPUT_VIDEO_CODEC_NAME:
         deviations.append(f"video codec is {video_codec!r}, expected {OUTPUT_VIDEO_CODEC_NAME!r}")
+    if pixel_format is not None and pixel_format != expected.pixel_format:
+        deviations.append(f"pixel format is {pixel_format!r}, expected {expected.pixel_format!r}")
     if require_audio:
-        if audio_codec != OUTPUT_AUDIO_CODEC:
-            deviations.append(f"audio codec is {audio_codec!r}, expected {OUTPUT_AUDIO_CODEC!r}")
-        if audio_sample_rate != OUTPUT_AUDIO_SAMPLE_RATE:
+        if audio_codec != expected.audio_codec:
+            deviations.append(f"audio codec is {audio_codec!r}, expected {expected.audio_codec!r}")
+        if audio_sample_rate != expected.audio_sample_rate:
             deviations.append(
-                f"audio sample rate is {audio_sample_rate}, expected {OUTPUT_AUDIO_SAMPLE_RATE}"
+                f"audio sample rate is {audio_sample_rate}, expected {expected.audio_sample_rate}"
             )
     if expected_duration_seconds is not None:
         drift = None if duration is None else abs(duration - expected_duration_seconds)
@@ -400,6 +418,7 @@ def inspect_output(
         width=width,
         height=height,
         frame_rate=frame_rate,
+        pixel_format=pixel_format,
         duration_seconds=duration,
         video_codec=video_codec,
         audio_codec=audio_codec,

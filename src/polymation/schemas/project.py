@@ -102,6 +102,10 @@ class ManifestPaths(PolymationModel):
 
     Stored explicitly so the layout can evolve without a schema migration for
     every consumer that needs to find a sibling document.
+
+    Every field has a default, which is what makes adding one backward
+    compatible: an M0.1 manifest that predates ``timeline`` loads cleanly and
+    picks up the default. See docs/DECISIONS.md D-015.
     """
 
     brief: str = "brief.md"
@@ -110,8 +114,13 @@ class ManifestPaths(PolymationModel):
     assets: str = "assets.json"
     rights: str = "rights.json"
     approvals: str = "approvals.json"
+    #: Added in M0.2. The document itself is optional: a project without a
+    #: compiled timeline is still valid, just not renderable by the engine.
+    timeline: str = "timeline.json"
     output_dir: str = "output"
     assets_dir: str = "assets"
+    #: Added in M0.2. Holds scene render caches; excluded from version control.
+    cache_dir: str = ".cache"
 
 
 class VideoProject(TimestampedDocument):

@@ -93,14 +93,21 @@ class MotionKind(str, Enum):
 class ShortSourcePolicy(str, Enum):
     """What to do when a video source is shorter than the shot needs.
 
-    The default is to fail. The alternatives exist so that holding or trimming
-    is an explicit, recorded decision rather than something the renderer does
+    The default is to fail. The alternatives exist so that holding or padding is
+    an explicit, recorded decision rather than something the renderer does
     quietly behind the operator's back.
+
+    Both non-error options **preserve the shot's timeline duration**. Shortening
+    the shot instead would change the scene's length, and therefore every
+    downstream frame position and the audio alignment with it — so it is not
+    offered. If a shot should be shorter, shorten it in the timeline.
     """
 
     ERROR = "error"
+    #: Freeze the final source frame for the remainder of the shot.
     HOLD_LAST_FRAME = "hold_last_frame"
-    TRIM_SHOT = "trim_shot"
+    #: Fill the remainder with the shot's background colour.
+    PAD_WITH_BACKGROUND = "pad_with_background"
 
 
 class TransitionKind(str, Enum):

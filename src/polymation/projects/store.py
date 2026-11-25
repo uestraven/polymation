@@ -22,6 +22,7 @@ from polymation.errors import (
     ProjectExistsError,
     ProjectNotFoundError,
 )
+from polymation.projects.journal import JournalledWrite, RecoveryOutcome, recover_project
 from polymation.schemas.approvals import ApprovalLedger
 from polymation.schemas.assets import AssetCollection
 from polymation.schemas.base import TimestampedDocument, utc_now
@@ -37,6 +38,7 @@ from polymation.schemas.project import (
 from polymation.schemas.rights import RightsLedger
 from polymation.schemas.script import ScriptDocument
 from polymation.schemas.storyboard import Storyboard
+from polymation.schemas.timeline import CompositionTimeline
 from polymation.validation.paths import resolve_within
 
 DocumentT = TypeVar("DocumentT", bound=TimestampedDocument)
@@ -72,10 +74,20 @@ _What specific question does this video answer, and why would a viewer care?_
 """
 
 
+def serialise_document(document: TimestampedDocument) -> bytes:
+    """Render a document as the exact bytes that would be written to disk.
+
+    Shared by the direct and journalled write paths so both produce identical
+    files, which matters because checksums of these bytes end up in approval
+    records.
+    """
+    payload = document.model_dump(mode="json")
+    return (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+
 def write_document(path: Path, document: TimestampedDocument) -> None:
     """Serialise ``document`` to ``path`` as readable JSON, atomically."""
-    payload = document.model_dump(mode="json")
-    rendered = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    rendered = serialise_document(document).decode("utf-8")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(
@@ -148,6 +160,11 @@ class ProjectBundle:
     assets: AssetCollection
     rights: RightsLedger
     approvals: ApprovalLedger
+    #: Added in M0.2. ``None`` for a project with no compiled timeline, which
+    #: includes every project created by M0.1.
+    timeline: CompositionTimeline | None = None
+    #: What journal recovery did when this bundle was loaded, if anything.
+    recovery: RecoveryOutcome | None = None
 
     @property
     def project_id(self) -> str:
@@ -162,15 +179,34 @@ class ProjectBundle:
         """Absolute location of an asset recorded at project-relative ``asset_path``."""
         return resolve_within(self.root, asset_path)
 
-    def save(self) -> None:
-        """Persist every document, refreshing the manifest's modification time."""
+    def save(self, *, operation: str = "save") -> None:
+        """Persist every document as one recoverable batch.
+
+        Each document is still written atomically, but the whole set now goes
+        through a write-ahead journal, so an interruption partway through cannot
+        leave the project internally inconsistent — an asset recorded with no
+        matching rights record, say. See :mod:`polymation.projects.journal`.
+        """
         self.manifest.touch()
-        write_document(self.root / self.manifest.paths.script, self.script)
-        write_document(self.root / self.manifest.paths.storyboard, self.storyboard)
-        write_document(self.root / self.manifest.paths.assets, self.assets)
-        write_document(self.root / self.manifest.paths.rights, self.rights)
-        write_document(self.root / self.manifest.paths.approvals, self.approvals)
-        write_document(self.root / "manifest.json", self.manifest)
+
+        paths = self.manifest.paths
+        documents: list[tuple[str, TimestampedDocument]] = [
+            (paths.script, self.script),
+            (paths.storyboard, self.storyboard),
+            (paths.assets, self.assets),
+            (paths.rights, self.rights),
+            (paths.approvals, self.approvals),
+        ]
+        if self.timeline is not None:
+            documents.append((paths.timeline, self.timeline))
+        # The manifest goes last: it is the document that names all the others,
+        # so it should not become live before they do.
+        documents.append(("manifest.json", self.manifest))
+
+        with JournalledWrite(self.root, operation=operation) as batch:
+            for relative_path, document in documents:
+                batch.stage(relative_path, serialise_document(document))
+            batch.commit()
 
 
 class ProjectStore:
@@ -216,6 +252,10 @@ class ProjectStore:
         if not (root / "manifest.json").is_file():
             raise ProjectNotFoundError(project_id)
 
+        # Resolve any interrupted write *before* reading, so no caller ever
+        # observes a half-applied batch.
+        recovery = recover_project(root)
+
         manifest = read_document(root / "manifest.json", VideoProject)
 
         if manifest.project_id != project_id:
@@ -224,6 +264,13 @@ class ProjectStore:
                 f"project_id {manifest.project_id!r}. Refusing to guess which is "
                 f"correct; rename the directory or correct the manifest."
             )
+
+        # The timeline is optional: projects created by M0.1 have none, and a
+        # project is still valid without one — just not renderable.
+        timeline_path = root / manifest.paths.timeline
+        timeline = (
+            read_document(timeline_path, CompositionTimeline) if timeline_path.is_file() else None
+        )
 
         return ProjectBundle(
             workspace=self.workspace,
@@ -234,6 +281,8 @@ class ProjectStore:
             assets=read_document(root / manifest.paths.assets, AssetCollection),
             rights=read_document(root / manifest.paths.rights, RightsLedger),
             approvals=read_document(root / manifest.paths.approvals, ApprovalLedger),
+            timeline=timeline,
+            recovery=recovery if recovery.acted else None,
         )
 
     def create(
