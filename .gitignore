@@ -50,3 +50,6 @@ fixtures/*
 .DS_Store
 .tmp/
 tmp/
+
+# Container verification artefacts
+pytest-report.xml

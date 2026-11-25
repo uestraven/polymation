@@ -154,12 +154,28 @@ rendered file locally — it reports conformance and exits 0.
 claims CI passes, and the workflow stays unverified until a run completes
 successfully.
 
-### G-2 — Local validation used Python 3.11, not the pinned 3.12
-`.python-version` pins 3.12 and CI installs it, but all local evidence came
-from Python 3.11.4. This host is Amazon Linux 2 with glibc 2.26; published
-Pillow wheels require `manylinux_2_28`, so uv's standalone 3.12 finds no
-compatible wheel and the source build fails for lack of libjpeg headers. The
-Linuxbrew interpreters work because Homebrew ships its own newer glibc.
+### G-2 — Pinned-Python validation now runs, in a container (RESOLVED 2026-11-25)
+Originally: all local evidence came from Python 3.11.4 rather than the pinned
+3.12, because this host is Amazon Linux 2 with glibc 2.26 while published Pillow
+wheels target `manylinux_2_28`, so uv's standalone 3.12 found no compatible
+wheel and its source build failed for lack of libjpeg headers.
+
+**Resolved** by `scripts/verify-python312.sh`, which runs the whole suite under
+the pinned interpreter in a disposable container with the host tree mounted
+read-only. Docker was already installed with a reachable daemon, so no
+privileged host modification was needed. Verified under Python 3.12.16 /
+FFmpeg 7.1.5: **278 passed, 0 skipped**, ruff clean, demonstration rendered and
+independently confirmed at 1920x1080 / 30/1 / h264 / aac 48 kHz / 15.000 s.
+
+The entrypoint fails if the running interpreter does not match
+`.python-version`, so the check cannot degrade into "some Python passed".
+Docker remains a **development** dependency only (D-014).
+
+Residual, and reported separately rather than merged: the host tier still runs
+Python 3.11.4 with FFmpeg 9.1, and the two tiers use different FFmpeg builds, so
+encoded bytes differ between them (356 122 vs 356 559 for the same
+demonstration). The output *specification* is what is asserted; byte
+reproducibility holds for a fixed FFmpeg build.
 
 Workaround in use locally:
 
@@ -225,11 +241,11 @@ proportional to total media size; with hours of footage this will be slow.
 
 | Constraint | Status |
 |---|---|
-| Python 3.12 unavailable from system/brew | Resolved via uv-managed 3.12 for CI; local uses brew 3.11 (G-2) |
+| Python 3.12 unavailable from system/brew | **Resolved** — validated under the pin in a container; host tier still 3.11 (G-2, D-014) |
 | FFmpeg absent | **Resolved** — FFmpeg 9.1 installed user-local via Linuxbrew with owner approval |
 | uv absent | **Resolved** — uv 0.13.10 installed user-local via pipx with owner approval |
 | `curl \| sh` installers blocked by the agent sandbox | Worked around with pipx |
-| glibc 2.26 vs `manylinux_2_28` wheels | Documented, not resolved (G-2) |
+| glibc 2.26 vs `manylinux_2_28` wheels | **Worked around** — container supplies glibc 2.41; host tier unaffected (G-2) |
 | No GitHub remote | **Resolved** — `origin` added on owner instruction; not pushed by the agent (G-1) |
 | Brand fonts not installed | Documented and reported at runtime (G-4) |
 

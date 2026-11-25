@@ -185,7 +185,24 @@ uv run pytest                        # or: .venv/bin/pytest
 uv run pytest -m "not ffmpeg"        # skip the FFmpeg integration tests
 uv run ruff check .
 uv run ruff format --check .
+
+scripts/verify.sh                    # everything CI runs, on this host
+scripts/verify-python312.sh          # the same, under the PINNED Python in Docker
 ```
+
+Verification has two tiers, reported separately:
+
+| Tier | Interpreter | How |
+|---|---|---|
+| **Host** | whatever is installed (3.11+) | `scripts/verify.sh` |
+| **Pinned** | exactly `.python-version` | `scripts/verify-python312.sh` (Docker) |
+
+The pinned tier exists because some hosts cannot install the pinned
+interpreter's dependencies (see the glibc note above). It mounts the repository
+read-only, copies it into a container, and fails if the running interpreter does
+not match the pin. **Docker is a development dependency only** — the
+application runs directly on a host with Python 3.11+ and FFmpeg, and no
+container is involved in running it. See `docs/DECISIONS.md` D-014.
 
 Tests use temporary directories and never touch the network. FFmpeg integration
 tests execute real FFmpeg commands; when FFmpeg is absent they skip explicitly,

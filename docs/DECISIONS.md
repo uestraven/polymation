@@ -321,3 +321,54 @@ validator. Rejected: repetitive, and easy to forget in a new validator.
 `DocumentDecodeError` (exit 3, a validation failure), whereas one supplied
 *directly* by the operator surfaces as `UnsafePathError` (exit 7, unsafe input).
 Both are correct for their context, and both are tested.
+
+---
+
+## D-014 — Pinned-Python validation runs in a container; containers are not a runtime requirement
+
+**Date:** 2026-11-25 · **Status:** accepted (M0.2 baseline closure)
+
+**Decision.** `scripts/verify-python312.sh` + `docker/verify.Dockerfile` run the
+full verification suite — lockfile install, lint, format, all tests including
+real-FFmpeg integration, and the rendering demonstration — under the
+interpreter pinned in `.python-version`, inside a disposable container. The
+host repository is mounted **read-only** and copied inside, so neither the host
+working tree nor the host `.venv` is touched.
+
+**Rationale.** M0.1 closed with a genuine gap: all local evidence came from
+Python 3.11.4 rather than the pinned 3.12, because this host is Amazon Linux 2
+with glibc 2.26 while published Pillow wheels target `manylinux_2_28` (D-011).
+The independent review classified A03 as PARTIAL for that reason. Docker was
+already installed with a reachable daemon, so an isolated environment was
+available without any privileged host modification — no `sudo`, no system
+package installation, no change to the host interpreter set.
+
+The container also verifies something the host cannot: that the pin is
+*correct*. The entrypoint compares the running interpreter against
+`.python-version` and fails if they differ, so the check cannot silently
+degrade into "some Python passed".
+
+**Alternatives considered.**
+- *Build Python 3.12 from source into a user prefix.* Workable, but it adds a
+  bespoke interpreter to the host that nobody else can reproduce, and it would
+  still need libjpeg/zlib headers to build Pillow from source.
+- *`brew install python@3.12`.* The formula is not present in this Homebrew
+  installation, and relying on Homebrew's own glibc makes the result specific
+  to Homebrew hosts rather than to the pin.
+- *Installing image codec headers so Pillow builds from source under 3.12.*
+  Possible, but it validates a locally compiled Pillow rather than the wheel
+  that `uv.lock` actually pins — weaker evidence, not stronger.
+- *Lowering the pin to 3.11.* Rejected: the milestone forbids silently changing
+  the Python requirement, and the pin is the deliberate target.
+
+**Consequences.** Verification now has two tiers, and they are reported
+separately: host (`scripts/verify.sh`, Python 3.11, FFmpeg 9.1) and pinned
+(`scripts/verify-python312.sh`, Python 3.12, FFmpeg 7.1.5). Running the
+pinned tier needs Docker, which is a *development* dependency only — the
+application itself runs directly on any host with Python 3.11+ and FFmpeg, and
+no container is involved in running or deploying it.
+
+The two tiers use different FFmpeg builds, so encoded bytes differ between them
+(356 122 vs 356 559 bytes for the same demonstration). That is expected: the
+output *specification* is what is asserted, not a byte-for-byte hash across
+encoder versions. Output remains byte-reproducible for a fixed FFmpeg build.
