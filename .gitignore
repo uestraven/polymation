@@ -53,3 +53,7 @@ tmp/
 
 # Container verification artefacts
 pytest-report.xml
+
+# CI artefacts
+benchmark.json
+warm.json

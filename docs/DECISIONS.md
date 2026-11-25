@@ -372,3 +372,173 @@ The two tiers use different FFmpeg builds, so encoded bytes differ between them
 (356 122 vs 356 559 bytes for the same demonstration). That is expected: the
 output *specification* is what is asserted, not a byte-for-byte hash across
 encoder versions. Output remains byte-reproducible for a fixed FFmpeg build.
+
+---
+
+## D-015 — `timeline.json` is a new optional document, not a manifest migration
+
+**Date:** 2026-11-25 · **Status:** accepted (M0.2)
+
+**Decision.** The composition timeline is its own document with its own schema
+version. `ManifestPaths` gained defaulted `timeline` and `cache_dir` fields.
+The manifest's own `schema_version` stays `1.0`.
+
+**Rationale.** Every field of `ManifestPaths` already had a default, which is
+what makes adding one backward compatible: an M0.1 manifest that predates
+`timeline` validates cleanly and picks up the default. A separate document was
+right rather than extending the storyboard because the two change for different
+reasons — the storyboard records creative intent, the timeline records
+executable placement — and because a project with no timeline is still valid.
+
+**Alternatives considered.**
+- *Extend the storyboard with executable fields.* Rejected: it would force
+  every editorial change through a schema that also carries encoder-facing
+  detail, and conflate two meanings the milestone explicitly separates.
+- *Bump the manifest schema version and write a migration.* Rejected as
+  unnecessary: a defaulted additive field needs no migration, and a migration
+  with nothing to migrate is dead code.
+
+**Consequences.** M0.1 projects load unchanged, verified by a test that strips
+the new keys from a manifest and reloads it. The reverse is not true: a manifest
+written by M0.2 has keys M0.1's `extra="forbid"` would reject. That is accepted
+— M0.1 is superseded — but it means downgrading is not supported.
+`bundle.timeline` is `Optional`, so every consumer must handle `None`.
+
+---
+
+## D-016 — Text becomes pixels before FFmpeg sees it
+
+**Date:** 2026-11-25 · **Status:** accepted (M0.2)
+
+**Decision.** All overlay and caption text is wrapped, measured and drawn to an
+RGBA PNG by Pillow. FFmpeg receives only the file's path, as one element of an
+argument vector. `drawtext` is not used anywhere.
+
+**Rationale.** The milestone requires that arbitrary approved text be handled
+safely and not interpolated into filter expressions. `drawtext` needs escaping
+for `:` `'` `\` `%` and more, and the rules differ between the filter-graph
+parser and the filter's own argument parser. Getting that wrong on
+operator-supplied text is a command-injection-shaped bug. Rendering to pixels
+removes the class of bug rather than defending against it: there is no escaping
+to get wrong, because there is no text in the filter string.
+
+It also buys real capability — wrapping, mid-word breaking, per-line alignment,
+a padded background box, and a line budget with an ellipsis — all of which
+`drawtext` does poorly or not at all.
+
+**Alternatives considered.**
+- *`drawtext` with careful escaping.* Rejected on the reasoning above. It also
+  cannot wrap text at all, which the milestone requires.
+- *ASS/SSA subtitles for captions.* Capable, but it is another text format with
+  its own escaping rules, and it would split caption rendering from overlay
+  rendering for no benefit.
+
+**Consequences.** One PNG per overlay per render, written to a scratch
+directory — cheap, and the files are small because the box shrinks to its
+content. Glyph coverage becomes a font problem rather than a filter problem:
+the fallback chain covers Latin-1, Greek and Cyrillic, but **no installed font
+covers CJK on this host**, so Japanese text renders as tofu. That is a real
+limitation for a channel about Japanese media and is recorded in
+`DEVELOPMENT_STATUS.md`.
+
+---
+
+## D-017 — Ducking is gain automation, not a sidechain compressor
+
+**Date:** 2026-11-25 · **Status:** accepted (M0.2)
+
+**Decision.** Music attenuation under narration is computed from the narration
+segments' known integer sample spans and applied as a piecewise `volume`
+envelope with linear attack and release ramps. `sidechaincompress` is not used.
+
+**Rationale.** The narration positions are *already known exactly* — they are
+timeline data, not something to be discovered from a signal. A compressor keyed
+off the narration waveform makes the result depend on the narration's level and
+dynamics, which means the same timeline ducks differently when the narration is
+re-recorded slightly louder, and a test cannot assert where music should be
+quiet without reasoning about the detector. Automation is reproducible and
+directly verifiable.
+
+Touching windows are merged before the envelope is built, so overlapping lead
+times cannot double-attenuate.
+
+**Alternatives considered.**
+- *`sidechaincompress`.* More "natural" sounding and the conventional broadcast
+  approach. Rejected for this milestone on reproducibility and testability; it
+  is a reasonable M0.3+ option once there is real narration to tune against.
+- *A fixed music level with no ducking.* Rejected: the milestone explicitly
+  says not to assume a fixed background level is universally appropriate.
+
+**Consequences.** The envelope is a long `volume` expression when there are many
+narration segments — numeric only, so no escaping concern, but it does grow.
+Ducking shape is linear rather than following a compressor's curve, which is
+less sophisticated than a real mix engineer would want. The attenuation,
+attack, release and lead times are all configurable.
+
+---
+
+## D-018 — Cross-scene crossfades are not supported
+
+**Date:** 2026-11-25 · **Status:** accepted (M0.2)
+
+**Decision.** `cut`, `fade_from_black` and `fade_to_black` apply within a shot;
+`crossfade` applies only between shots **inside one scene**. A crossfade on a
+scene's `transition_in`/`transition_out` is rejected by both the schema and the
+validator.
+
+**Rationale.** A scene is the unit of caching, and caching is only sound if a
+scene renders independently. A cross-scene crossfade makes scene *N*'s output
+depend on scene *N−1*'s, so editing one scene would invalidate its neighbour,
+and the two could no longer be rendered or reused separately. The milestone
+explicitly permits deferring this if it complicates independent scene
+rendering — it does, fundamentally.
+
+Fades to and from black happen *inside* the owning span, so they never change
+the timeline duration. Within-scene crossfades do consume timeline, and the
+overlap is accounted for explicitly in the shot spans rather than left implicit.
+
+**Alternatives considered.**
+- *Render overlapping scene pairs as a combined unit.* Would work, at the cost
+  of a cache whose unit is sometimes a scene and sometimes a pair — much more
+  complexity for a transition that is rarely the right editorial choice between
+  two scenes anyway.
+- *Cross-fade at assembly by re-encoding the join.* Defeats the stream-copy
+  concatenation that makes warm renders fast.
+
+**Consequences.** A documented limitation: scene-to-scene transitions are a cut
+or a fade through black. Recorded in `DEVELOPMENT_STATUS.md` and
+`COMPOSITION.md`.
+
+---
+
+## D-019 — Final assembly has its own cache
+
+**Date:** 2026-11-25 · **Status:** accepted (M0.2)
+
+**Decision.** A second cache under `.cache/assembly/<profile>/`, keyed on the
+scene digests plus the audio mix, the loudness target and the caption text.
+
+**Rationale.** Found by measurement, not by design. Scene caching made the
+scene-rendering phase nearly free on a warm run, but a warm 180-second final
+render still took 115 s — 112 s of it in assembly. The cause: burning in
+captions changes pixels, so the concatenated video must be re-encoded, which
+defeats the stream-copy path that assembly otherwise uses.
+
+Assembly genuinely has dependencies that belong to no single scene — the audio
+mix, the loudness target, the caption text — which is exactly the case the
+milestone anticipates in allowing separate cache dependencies for global mixing
+and final assembly. With the cache, warm assembly is 0.1 s and a warm render is
+~1.2 s.
+
+**Alternatives considered.**
+- *Cache only the captioned video, re-mux audio each time.* Cheaper to store,
+  but the audio path includes a two-pass loudness measurement that decodes the
+  whole programme twice — tens of seconds, for no benefit when nothing changed.
+- *Accept slow warm renders when captions are burned in.* Rejected: selective
+  rendering is a headline goal of the milestone, and "fast unless you use
+  captions" is not selective rendering.
+
+**Consequences.** Cached output is stored once more on disk (about 20 MB for the
+reference fixture at final quality), and a hit is a file copy to the
+destination. Both caches are reported separately by `cache status`. Superseded
+entries are not garbage-collected.

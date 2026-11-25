@@ -28,6 +28,7 @@ Use the stack in `docs/ARCHITECTURE.md` and `docs/DECISIONS.md`:
 | Data contracts | Pydantic v2, with explicit `schema_version` |
 | Dependencies | uv |
 | Video / inspection | FFmpeg / ffprobe, via explicit argument lists |
+| Text rendering | Pillow — **never** FFmpeg `drawtext` (D-016) |
 | Image fixtures | Pillow |
 | Tests | pytest |
 | Lint / format | Ruff |
@@ -37,6 +38,33 @@ Use the stack in `docs/ARCHITECTURE.md` and `docs/DECISIONS.md`:
 Do **not** introduce without a recorded decision in `docs/DECISIONS.md` and
 owner approval: a database, a web server, a GUI, containers, distributed
 processing, cloud infrastructure, or any paid dependency.
+
+## 2b. Composition engine invariants
+
+Added in M0.2. Breaking any of these is a correctness or safety regression, not
+a style question.
+
+- **Integer frames are authoritative for video, integer samples for audio.**
+  Never accumulate float seconds; over a three-minute video that drifts into a
+  dropped frame and A/V desync. Convert at the FFmpeg boundary only.
+- **A scene must render independently.** It is the unit of caching, so scene
+  *N*'s output may not depend on *N−1*'s. This is why shot spans are
+  scene-relative, why audio is mixed at assembly, and why cross-scene
+  crossfades do not exist (D-018).
+- **Never silently loop, freeze, stretch, trim or pad media.** Every such
+  behaviour must be an explicitly requested policy or a validation error. A
+  non-error short-source policy must preserve the shot's duration.
+- **Cache keys are content, never timestamps.** A timestamp is not evidence
+  about content. Any new input that can change rendered bytes must be added to
+  the key, or the cache will serve stale frames.
+- **Validate a cache entry before reusing it.** A render killed mid-write leaves
+  a short file; serving it is silent corruption.
+- **Never let a failed render replace a valid output.** Produce under a
+  temporary name, verify with ffprobe, then move.
+- **A scene-only render must say that assembly was not updated.** Silence there
+  means an operator ships a stale video.
+- **No distortion.** Never emit an unconstrained `scale=W:H`; every fit path
+  uses `force_original_aspect_ratio`.
 
 ## 3. Code quality
 
@@ -62,7 +90,14 @@ processing, cloud infrastructure, or any paid dependency.
 - **No test may touch the network.** There is no mocking layer for network calls
   because there are no network calls.
 - FFmpeg integration tests execute real FFmpeg, marked `@pytest.mark.ffmpeg` and
-  guarded by `ffmpeg_required`. A skip is honest; it is not a pass.
+  guarded by `ffmpeg_required`. A skip is honest; it is not a pass. **Never
+  replace rendering verification with a mock.**
+- Assert on **decoded pixels and samples**, not on log output: extract a frame
+  and check its colour, decode the audio and measure its envelope, count frames
+  with `ffprobe -count_frames`.
+- When a test guards an invariant, add a second test proving the guard can
+  fail. A guard that cannot fail is not a guard — two of them in this repository
+  silently passed everything until that second test was written.
 - Do not write tests whose only purpose is to raise a coverage number. A test
   that asserts nothing meaningful is worse than no test.
 - Report actual counts and actual results. Never estimate or project them.
@@ -104,6 +139,14 @@ evidence that a stage was approved.
 - Never read a credential into a manifest, a log line or an error message.
 - Invoke external tools with an explicit `list[str]` argument vector. Never
   build a shell command string, and never pass `shell=True`.
+- **No filesystem path may enter an FFmpeg filter string.** Sources and overlay
+  images are `-i` arguments. `FFmpegPlan.leaked_paths()` enforces this.
+- **No operator-supplied text may enter an FFmpeg filter string.** Render text
+  to pixels with `rendering/text.py` instead. `drawtext` needs escaping that
+  differs between the graph parser and the filter, which on untrusted text is a
+  command-injection-shaped bug.
+- Build filter expressions from numbers, arithmetic and fixed keywords only, and
+  avoid commas inside them so there is no argument escaping at all.
 - Every stored path is project-relative and passes through
   `polymation.validation.paths`. Nothing may be read or written outside the
   project directory, including via symlink.
@@ -134,8 +177,14 @@ This section is as important as the code.
   EXECUTED rather than inferring that they would pass.
 - Do not create fake integrations or placeholder functions that return plausible
   data. A missing capability must fail loudly.
-- Keep `docs/DEVELOPMENT_STATUS.md` and `docs/ACCEPTANCE_CRITERIA.md` truthful
-  and current as part of the change that affects them.
+- Keep `docs/DEVELOPMENT_STATUS.md`, `docs/COMPOSITION.md` and the acceptance
+  matrices truthful and current as part of the change that affects them.
+- **Measure before optimising.** The assembly cache exists because a benchmark
+  showed warm renders spending 112s of 115s in assembly; do not add
+  optimisations ahead of evidence.
+- **Benchmark on a fresh workspace.** Reusing one has twice produced misleading
+  numbers here: a warm render that looked slow, and a cache miss that looked
+  like a hit.
 
 ## 10. Repository hygiene
 

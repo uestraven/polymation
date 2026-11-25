@@ -1,7 +1,12 @@
 # Architecture
 
-Status: current as of M0.1. Everything described here is implemented unless
+Status: current as of M0.2. Everything described here is implemented unless
 explicitly marked as a future extension point.
+
+For how to *use* the composition engine — timeline authoring, fit modes, motion,
+audio mixing, captions, profiles, caching, recovery, benchmark methodology — see
+[`COMPOSITION.md`](COMPOSITION.md). This document covers structure and
+boundaries.
 
 ---
 
@@ -13,26 +18,32 @@ workspace, loads or writes JSON documents, optionally shells out to FFmpeg, and
 prints a result.
 
 ```
-            polymation <command>
-                    │
-              ┌─────▼─────┐
-              │  cli.py   │   argument parsing, output formatting, exit codes
-              └─────┬─────┘
-       ┌────────────┼────────────┬───────────────┬──────────────┐
-       ▼            ▼            ▼               ▼              ▼
-   projects/     media/       rights/       validation/     rendering/
-   store, ids    inspect,     reporting     validator,      fixtures,
-                 import,                    paths           compose,
-                 checksum                                   ffmpeg, demo
-       └────────────┴────────────┴───────────────┴──────────────┘
-                                 │
-                         ┌───────▼───────┐
-                         │   schemas/    │  Pydantic data contracts
-                         └───────┬───────┘
-                                 │
-                         ┌───────▼───────┐
-                         │    config/    │  workspace layout, channel YAML
-                         └───────────────┘
+          polymation <command>
+                  │
+        ┌─────────▼──────────┐
+        │ cli.py cli_render  │  parsing, output formatting, exit codes
+        └─────────┬──────────┘
+   ┌──────┬───────┼────────┬──────────┬───────────┬──────────┐
+   ▼      ▼       ▼        ▼          ▼           ▼          ▼
+projects/ media/ rights/ captions/ timeline/  validation/ rendering/
+store     inspect report  srt       compile    validator   engine
+ids       import          
+locking   checksum                  validate   paths       scene
+journal                                                    graph audio
+                                                           cache overlays
+                                                           text colors
+                                                           profiles loudness
+                                                           synth reference
+                                                           fixtures compose
+   └──────┴───────┴────────┴──────────┴───────────┴──────────┘
+                            │
+                    ┌───────▼───────┐
+                    │   schemas/    │  Pydantic data contracts
+                    └───────┬───────┘   (+ timeline, timing)
+                            │
+                    ┌───────▼───────┐
+                    │    config/    │  workspace layout, channel YAML
+                    └───────────────┘
 ```
 
 Dependencies point downward only. `schemas` imports `validation.paths` (to
@@ -60,8 +71,26 @@ become an import cycle.
 | `validation/validator.py` | Cross-document validation; structural vs render readiness. |
 | `rendering/ffmpeg.py` | Tool discovery and subprocess invocation. |
 | `rendering/fixtures.py` | Programmatic generation of original images and audio. |
-| `rendering/compose.py` | The M0.1 renderer and ffprobe output verification. |
-| `rendering/demo.py` | Building the demonstration project from fixtures. |
+| `rendering/compose.py` | The M0.1 still-image renderer, plus profile-aware ffprobe verification used by both milestones. |
+| `rendering/demo.py` | Building the M0.1 demonstration project from fixtures. |
+| `rendering/profiles.py` | Preview and final profiles, including every encoder setting. |
+| `rendering/engine.py` | Orchestration: preflight, per-scene render, assembly, verification. |
+| `rendering/scene.py` | Rendering one scene to a cacheable intermediate. |
+| `rendering/graph.py` | Filter-graph construction: fit, crop, motion, fades, joins, overlay compositing. |
+| `rendering/overlays.py` | Overlay rendering and anchor/safe-area placement. |
+| `rendering/text.py` | Text to pixels. The reason arbitrary text is safe. |
+| `rendering/colors.py` | Resolving `#RRGGBB` and `palette:` specs against the brand. |
+| `rendering/audio.py` | The audio mix graph, buses, and ducking automation. |
+| `rendering/loudness.py` | EBU R128 measurement and two-pass normalisation. |
+| `rendering/cache.py` | Content-addressed scene and assembly caches. |
+| `rendering/synth.py` | Synthetic video generation and A/V sync markers. |
+| `rendering/reference.py` | The ~180-second engineering reference fixture. |
+| `timeline/compile.py` | Projecting a storyboard onto the frame grid. |
+| `timeline/validate.py` | Timeline validation against assets, profile and filesystem. |
+| `captions/srt.py` | SRT parsing, formatting and timing validation. |
+| `projects/locking.py` | Advisory project locks with stale-lock recovery. |
+| `projects/journal.py` | Write-ahead journal for recoverable multi-document writes. |
+| `validation/findings.py` | Dependency-free finding types, shared by every layer. |
 
 ---
 
@@ -94,9 +123,16 @@ projects/<project_id>/
 ├── assets.json        AssetCollection     — imported media + checksums
 ├── rights.json        RightsLedger        — one record per asset
 ├── approvals.json     ApprovalLedger      — human decisions + artefact hashes
+├── timeline.json      CompositionTimeline — executable placement (M0.2, optional)
 ├── assets/{images,footage,narration,graphics,music}/
 ├── research/ captions/ previews/ thumbnails/ output/
+├── .cache/             scene and assembly render caches (git-ignored)
+├── .journal/           write-ahead journal, present only mid-write
+└── .polymation.lock    advisory lock, present only while a command runs
 ```
+
+`timeline.json` is **optional**: every project M0.1 created has none, and loads
+unchanged (D-015).
 
 ### Write discipline
 
@@ -298,49 +334,68 @@ Every path stored in a manifest is project-relative, POSIX-separated, and passes
 
 ---
 
-## 10. Rendering proof-of-concept boundaries
+## 10. Rendering boundaries
 
-`rendering/compose.py` is intentionally narrow. It composes **still-image shots
-plus one optional audio bed** into a single MP4:
+M0.1's `rendering/compose.py` renderer remains, unchanged, driving the M0.1
+demonstration. M0.2 adds a real composition engine alongside it.
 
-- each shot is looped for its duration, fitted to 1920×1080 with
-  `force_original_aspect_ratio` (`contain` pads with a brand colour, `cover`
-  crops) — neither mode can distort;
-- `setsar=1` and `fps=30` normalise every input before `concat`;
-- output is H.264 `yuv420p` / AAC 48 kHz stereo, `+faststart`;
-- `-shortest` prevents a long audio bed from extending the video.
+### What the M0.2 engine does
 
-It then verifies the result with ffprobe against the mandated specification and
-reports any deviation.
+Still images **and** video sources, trimmed and frame-rate normalised; three
+non-distorting fit modes plus explicit crop; two scaling kernels; deterministic
+pan and zoom over stills; seven overlay primitives with safe-area placement;
+four independent audio buses with automation ducking and two-pass loudness
+normalisation; SRT import, export and burn-in; cuts, fades to and from black,
+and within-scene crossfades; two output profiles; content-addressed per-scene
+and per-assembly caching; advisory locking and journalled writes.
 
-**Not implemented, and not stubbed:** transitions, motion/Ken Burns effects,
-narration synchronisation, captions, video-source shots, multi-track audio
-mixing, per-scene render caching, shorts rendering. These are M0.2 and later.
+### What it deliberately does not do
+
+- **Cross-scene crossfades.** They would couple adjacent scenes and break
+  per-scene caching (D-018).
+- **Retiming.** Shots render at 1:1 speed. There is no slow motion, no speed
+  ramp, and `SourceTrim` carries only a start offset, because modelling a
+  separate source duration would imply support that does not exist.
+- **Motion on video sources.** Rejected by validation; moving an
+  already-moving source is out of scope.
+- **Vertical shorts.** Out of scope.
+- **A general effects framework.** The transition and motion sets are closed by
+  design.
+- **Caption generation.** Externally supplied SRT only; no transcription, no
+  speech alignment.
+- **Text-to-speech.** Narration is supplied, or a synthetic tone in fixtures.
+
+### Why scenes render independently
+
+A scene is the unit of caching, so scene *N*'s output must not depend on
+*N−1*'s. That single constraint explains several design choices that would
+otherwise look arbitrary: shot spans are scene-relative; audio is mixed once at
+assembly rather than per scene, because narration deliberately crosses scene
+boundaries; and cross-scene crossfades are absent.
+
+Scene intermediates are video-only and encoded with the profile's exact
+settings, so assembly concatenates them by **stream copy** rather than
+re-encoding. That is what makes a warm render fast.
 
 ### Subprocess discipline
 
-All FFmpeg calls go through `rendering/ffmpeg.run_tool`, which takes an explicit
-`list[str]` argument vector. `shell=True` appears nowhere in the codebase, and
-no command line is built by string interpolation. A filename containing shell
-metacharacters is just a filename. There is a test that asserts this.
+Unchanged from M0.1 and extended: every FFmpeg call goes through `run_tool`
+with an explicit `list[str]`. `shell=True` appears nowhere. Two further
+invariants hold across the composition engine, each pinned by a test that is
+also shown catching a planted violation:
 
-### Fixture generation
-
-`rendering/fixtures.py` produces every demonstration asset from code: solid
-fills, geometric primitives, text drawn with locally installed fonts, and a sine
-tone synthesised with `math` and `wave`. Output is deterministic, so checksums
-are stable across runs.
-
-Font handling is deliberately loud: `resolve_font` reports whether the requested
-brand family was found, and `FontResolution.description` says "NOT the brand
-font" when a substitute is used. A render with substituted type never implies
-brand fidelity.
-
----
+1. **No filesystem path ever enters a filter string.** Sources and overlay
+   images are `-i` arguments. `FFmpegPlan.leaked_paths()` checks this.
+2. **No operator text ever enters a filter string.** Text is already pixels
+   (D-016); colours are resolved to `0xRRGGBB` literals; filter expressions
+   contain only numbers, arithmetic and fixed keywords, and avoid commas so
+   there is no argument escaping at all.
 
 ## 11. CLI architecture
 
-- One Typer app with three sub-apps (`asset`, `rights`, `demo`).
+- One Typer app. M0.1 sub-apps: `asset`, `rights`, `demo`. M0.2 adds
+  `timeline`, `cache` and `reference` sub-apps plus top-level `render` and
+  `inspect`, defined in `cli_render.py` so `cli.py` stays navigable.
 - Every command: resolve workspace → load channel/project → call a library
   function → format output. Logic that a test might want to call directly lives
   in the library, not in the command.
@@ -367,19 +422,21 @@ than propagating it, so the return value is honoured as well as the exception.
 
 ## 12. Future extension points
 
-Where later milestones are expected to attach, without anything being built for
-them now:
+Where later milestones are expected to attach. Nothing below is implemented.
 
 | Milestone | Extension point |
 |---|---|
-| M0.2 composition | `rendering/compose.py` — shot composition is already per-shot filter chains plus a `concat`; transitions and motion extend the chain builder. `FitMode` is an enum ready for more modes. |
-| M0.2 caching | A shot's cache key is its asset checksum plus its shot fields — both already stored. No cache exists yet. |
-| M0.3 templates | `config/channel.py` already supplies colours and fonts as data; a template layer would consume `ChannelBrand` rather than hardcoding. |
-| M1 research | `ScriptDocument.claims` (`FactualClaim`, with `source` and `verification`) is the landing place for sourced research. |
-| M2 script/storyboard generation | `ScriptDocument` and `Storyboard` are the output contracts; `NarrationStatus` already separates draft from approved. |
-| M3 narration/assets | `AssetCategory.NARRATION` and `RightsRecord.ai_generated` exist; no generator does. |
-| M5 packaging / QA | `ApprovalStage` includes `RENDER` and `PUBLICATION`; `ApprovalLedger.has_valid_approval` is the gate a QA step would call. |
-| Cross-project analytics | `polymation list` reads manifests directly. A read-only index could be derived from them if scale ever justifies it (see D-004). |
+| M0.3 templates | `rendering/overlays.py` already consumes `ChannelBrand` and a `TextStyle`; a template layer would compose overlays from brand data rather than per-project styling. `FALLBACK_FONT_FAMILIES` is where an acquired brand font would land. |
+| M0.3 typography | `resolve_font` reports substitution; installing licensed brand fonts changes behaviour with no code change, and invalidates every scene cache automatically because the font checksum is in the key. |
+| M0.4 pilot | The engine is the deliverable it exercises. `ShortSourcePolicy` and `validate_timeline`'s warnings are the places real material will press first. |
+| M1 research | `ScriptDocument.claims` (`FactualClaim`, with `source` and `verification`). |
+| M2 script/storyboard generation | `compile_timeline` is the seam: anything that produces a valid storyboard gets a timeline for free. `NarrationStatus` already separates draft from approved. |
+| M3 narration | `AudioRole.NARRATION` and the audio bus system exist; a TTS integration would import audio and place segments. `Ducking` is already configurable per project. |
+| M3 asset generation | `RightsRecord.ai_generated` exists; no generator does. |
+| M5 packaging / QA | `ApprovalStage` includes `RENDER` and `PUBLICATION`; `ApprovalLedger.has_valid_approval` is the gate a QA step would call. `inspect_output` and `measure_loudness` are the QA primitives. |
+| Retiming / effects | `CompositionShot` would need a source duration separate from its span, and `MotionKind`/`TransitionKind` are closed enums ready to widen. Both are deliberately absent (§10). |
+| Cross-scene transitions | Would require the cache unit to become a scene *group*. See D-018 for why that was not done. |
+| Cross-project analytics | `polymation list` reads manifests directly. A derived read-only index could be added if scale ever justifies it (D-004). |
 
-None of these are implemented. The data contracts that already exist were
-required by M0.1 in their own right.
+The data contracts that already exist were required by M0.1 or M0.2 in their own
+right. None of them is speculative scaffolding for a later milestone.

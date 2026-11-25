@@ -54,6 +54,9 @@ ignore = [
 # which several graph tests use as synthetic path strings that are never
 # opened — the assertion is about the generated filter text, not the file.
 "tests/*" = ["S101", "S108"]
+# Benchmark asserts are internal invariant checks on a developer tool, not
+# input validation.
+"scripts/*" = ["S101"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

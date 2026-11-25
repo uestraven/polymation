@@ -152,6 +152,72 @@ jobs:
       - name: Validate the demonstration project
         run: uv run polymation validate demo-technical-fixture --json
 
+      # --- M0.2 composition engine -------------------------------------------
+
+      - name: Build the engineering reference fixture
+        run: uv run polymation reference build --recreate
+
+      - name: Validate the reference timeline
+        run: |
+          uv run polymation timeline validate reference-engineering-fixture \
+            --profile final --json
+
+      - name: Render the reference fixture (preview profile)
+        run: uv run polymation render reference-engineering-fixture --preview --overwrite
+
+      - name: Render the reference fixture (final profile)
+        run: uv run polymation render reference-engineering-fixture --final --overwrite
+
+      - name: Assert the reference output matches both profiles
+        run: |
+          BASE=projects/reference-engineering-fixture/output/reference-engineering-fixture
+          uv run polymation inspect "$BASE-preview.mp4" \
+            --profile preview --expect-duration 180 --tolerance 0.2
+          uv run polymation inspect "$BASE-final.mp4" \
+            --profile final --expect-duration 180 --tolerance 0.2
+
+      - name: Assert the decoded frame count is exact
+        run: |
+          OUTPUT=projects/reference-engineering-fixture/output/reference-engineering-fixture-final.mp4
+          FRAMES=$(ffprobe -v error -count_frames -select_streams v:0 \
+            -show_entries stream=nb_read_frames -of default=nw=1:nk=1 "$OUTPUT")
+          echo "decoded frames: $FRAMES (expected 5400)"
+          if [ "$FRAMES" != "5400" ]; then
+            echo "::error::decoded $FRAMES frames, expected 5400"
+            exit 1
+          fi
+
+      - name: Demonstrate selective cache invalidation
+        run: |
+          # A second identical render must reuse every scene.
+          uv run polymation render reference-engineering-fixture --final --overwrite --json \
+            > warm.json
+          uv run python - <<'PY'
+          import json, sys
+          data = json.load(open("warm.json"))
+          cache = data["cache"]
+          print("warm render:", json.dumps(cache, indent=2))
+          if cache["rebuilt_count"] != 0 or cache["hit_count"] == 0:
+              print("::error::a warm render rebuilt scenes; the cache is not working")
+              sys.exit(1)
+          PY
+
+      - name: Benchmark the composition engine
+        run: uv run python scripts/benchmark.py --json benchmark.json
+
+      - name: Upload the reference fixture and benchmark
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engineering-reference
+          path: |
+            projects/reference-engineering-fixture/output/*.mp4
+            projects/reference-engineering-fixture/output/*.srt
+            benchmark.json
+            warm.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Upload the rendered demonstration
         if: always()
         uses: actions/upload-artifact@v4

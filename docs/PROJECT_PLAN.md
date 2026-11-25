@@ -8,7 +8,7 @@ authorization from the project owner.
 
 ---
 
-## M0.1 — Foundation and Pilot Workspace — **current**
+## M0.1 — Foundation and Pilot Workspace — **complete**
 
 Establish a clean, reproducible software foundation with a narrow vertical
 slice through to rendering.
@@ -24,19 +24,28 @@ rendering engine. See `docs/DEVELOPMENT_STATUS.md`.
 
 ---
 
-## M0.2 — Core Video Composition and Rendering — *planned*
+## M0.2 — Core Video Composition and Rendering — **current**
 
 Turn the proof of concept into a usable renderer.
 
-Anticipated: video-source shots alongside stills; transitions (cut, dissolve,
-fade); motion (pan and zoom over stills); narration-track synchronisation so
-shot timing follows audio; multi-track audio mixing with ducking; per-scene
-render caching keyed on asset checksum plus shot fields; preview renders at
-reduced resolution; deterministic output given identical inputs.
+Delivered: a frame-exact composition timeline separate from the storyboard;
+video-source shots alongside stills with trimming and frame-rate normalisation;
+three non-distorting fit modes plus explicit crop; deterministic pan and zoom;
+seven timed overlay primitives with safe-area placement and safe arbitrary text;
+four independent audio buses with automation ducking and two-pass loudness
+normalisation; SRT import, export and burn-in; cuts and fades to and from black,
+plus within-scene crossfades; preview and final profiles; content-addressed
+per-scene and per-assembly caching; advisory locking and journalled writes; an
+original 180-second engineering reference fixture with measurable A/V sync.
 
-Open questions: whether to keep composing in one FFmpeg invocation or render
-scenes separately and concatenate; how to represent a timeline that is no longer
-a simple sequence.
+The open questions resolved as: **render scenes separately and concatenate by
+stream copy** (which is what makes selective rendering possible), and keep the
+timeline a sequence of scenes each holding a sequence of shots, with crossfade
+overlap accounted for explicitly in the spans.
+
+Deferred with documentation: cross-scene crossfades (they would break
+cache isolation), retiming, and motion on video sources. See
+`docs/DEVELOPMENT_STATUS.md` §4.
 
 ---
 

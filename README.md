@@ -9,11 +9,20 @@ Polymation Studio is the production *engine* — a reusable local toolchain for
 research, scripting, media management, rights tracking, rendering and (much
 later) packaging. It is not a content bot, and it does not publish anything.
 
-**Current milestone: M0.1 — Project Foundation & Pilot Production Workspace.**
-This milestone delivers project scaffolding, versioned data contracts, media
-import with provenance, project validation and a deliberately narrow FFmpeg
-rendering demonstration. See [`docs/DEVELOPMENT_STATUS.md`](docs/DEVELOPMENT_STATUS.md)
-for exactly what is and is not implemented, and
+**Current milestone: M0.2 — Core Video Composition & Rendering Engine.**
+
+M0.1 delivered the foundation: project scaffolding, versioned data contracts,
+media import with provenance, validation, and a narrow FFmpeg demonstration.
+
+M0.2 replaces that demonstration with a real composition engine — a frame-exact
+timeline, video and still sources, pan and zoom, timed overlays, independent
+audio buses with ducking and loudness normalisation, SRT captions, two output
+profiles, and content-addressed per-scene caching so editing one scene
+re-renders one scene.
+
+See [`docs/COMPOSITION.md`](docs/COMPOSITION.md) for how to use it,
+[`docs/DEVELOPMENT_STATUS.md`](docs/DEVELOPMENT_STATUS.md) for exactly what is
+and is not implemented, and
 [`docs/ACCEPTANCE_CRITERIA.md`](docs/ACCEPTANCE_CRITERIA.md) for the evidence
 behind each acceptance criterion.
 
@@ -113,9 +122,31 @@ polymation asset list PROJECT_ID
 # Rights
 polymation rights report PROJECT_ID
 
-# Technical demonstration
+# Technical demonstration (M0.1)
 polymation demo create [--recreate]
 polymation demo render [--overwrite]
+
+# Composition timeline (M0.2)
+polymation timeline compile PROJECT_ID [--profile final|preview] \
+    [--narration ASSET_ID ...] [--music ASSET_ID] [--overwrite]
+polymation timeline validate PROJECT_ID [--profile ...] [--strict]
+
+# Rendering (M0.2)
+polymation render PROJECT_ID --preview            # 960x540, fast
+polymation render PROJECT_ID --final              # 1920x1080, publication quality
+polymation render PROJECT_ID --final --scene scene-03   # one scene only
+polymation render PROJECT_ID --final --force      # ignore the cache
+polymation render PROJECT_ID --final --overwrite  # replace an existing output
+
+# Caches (M0.2) — scoped to the project; never touches source media
+polymation cache status PROJECT_ID
+polymation cache clear PROJECT_ID [--profile preview|final]
+
+# Inspect any video against a profile (M0.2)
+polymation inspect VIDEO_PATH [--profile final] [--expect-duration 180]
+
+# Engineering reference fixture (M0.2)
+polymation reference build [--recreate]
 ```
 
 ### Exit codes
@@ -178,6 +209,38 @@ closing card says so on screen.
 
 ---
 
+## The engineering reference fixture (M0.2)
+
+```bash
+polymation reference build --recreate
+polymation render reference-engineering-fixture --preview
+polymation render reference-engineering-fixture --final
+```
+
+Exactly **5400 frames = 180.000 s** at 30 fps: six scenes, 11 shots, 24
+overlays, 7 audio segments, 15 generated assets. It exercises every fit mode,
+every motion kind, stills and video together, a within-scene crossfade, fades at
+the boundaries, every overlay primitive, the explicit short-source policy,
+narration plus ducked music, and burned-in captions.
+
+Nine synchronisation markers (a magenta block on known frames plus a click at
+the corresponding samples) let A/V sync be **measured** rather than eyeballed.
+
+```bash
+scripts/benchmark.py --json results.json   # cold/warm timings, sync, loudness
+```
+
+Measured on an 8-vCPU Xeon 8252C with FFmpeg 9.1: cold preview ~54 s, cold final
+~149 s, warm final ~1.2 s, and a one-scene edit rebuilds exactly one scene and
+reuses five. Output: 5400/5400 frames decoded, −16.0 LUFS, 9/9 markers in both
+channels.
+
+Like the M0.1 demonstration, it is an engineering benchmark and **not an
+episode**: narration is a synthetic tone, not speech, and rights are
+deliberately unreviewed.
+
+---
+
 ## Testing
 
 ```bash
@@ -213,44 +276,55 @@ installs FFmpeg and runs them.
 
 ## Known limitations
 
-These are real gaps, not deferred polish:
+These are real gaps, not deferred polish. Full detail with rationale in
+[`docs/DEVELOPMENT_STATUS.md`](docs/DEVELOPMENT_STATUS.md) §4.
 
-- **Rendering is a narrow proof of concept.** Still-image shots plus one audio
-  bed, concatenated. No transitions, motion, narration synchronisation,
-  captions, video-source shots or render caching — all M0.2.
+**Composition**
+
+- **No cross-scene crossfades.** Scene-to-scene transitions are a cut or a fade
+  through black. A cross-scene crossfade would couple adjacent scenes and break
+  per-scene caching (`docs/DECISIONS.md` D-018).
+- **No retiming.** Shots render at 1:1 speed — no slow motion, no speed ramps.
+- **No motion on video sources.** Rejected by validation; pan and zoom apply to
+  stills only.
+- **No vertical shorts rendering.** The `short` format is a valid manifest
+  value; nothing renders it.
+- **No CJK glyphs.** Text is rendered to pixels by Pillow, which is what makes
+  arbitrary text safe — but no installed font on the development host covers
+  CJK, so Japanese text renders as tofu boxes. A real limitation for a channel
+  about Japanese media; installing a CJK font fixes it with no code change.
+- **Brand values and fonts are provisional.** Overlay text uses a substitute
+  typeface and the tooling says so. Final typography is M0.3.
+
+**Content and rights**
+
 - **No content generation of any kind.** No research, no LLM integration, no
   script generation, no image generation, no text-to-speech, no stock media
   acquisition. The schemas exist; the generators do not.
-- **No publishing, no analytics, no YouTube integration.** Out of scope, and
+- **No caption generation.** Externally supplied SRT only — no transcription,
+  no speech alignment.
+- **No publishing, no analytics, no YouTube integration.** Out of scope and
   deliberately absent rather than stubbed.
 - **Rights decisions are human-only.** The platform records provenance and
   refuses to approve user-supplied, proposed-fair-use or unknown material on its
   own. It makes no copyright determination.
-- **Brand values are provisional.** The palette, tagline and proposed fonts in
-  `channels/polymation/` are a working starting point, not approved artwork. If
-  a proposed font is not installed, text is drawn with a substitute and the CLI
-  says so explicitly rather than implying brand fidelity.
-- **Shorts rendering is not implemented.** The `short` format is a valid
-  manifest value; nothing renders it yet.
 - **No command creates an approval record.** The platform stores, verifies and
-  invalidates approvals, but approving an asset currently means hand-editing
-  `rights.json` and `approvals.json`. Left as a gap deliberately rather than
-  filled with an auto-approve shortcut.
+  invalidates approvals, but approving an asset still means hand-editing
+  `rights.json` and `approvals.json`.
+
+**Operations**
+
+- **Advisory locking only.** A lock file prevents two commands on one machine
+  from interleaving writes; it does not coordinate across NFS or between hosts.
+- **Superseded cache entries are not garbage-collected.** Editing a scene leaves
+  its old entry on disk. `cache status` reports total bytes so this is visible.
 - **No cross-project index.** `polymation list` reads every manifest from disk.
-  Fine at this scale; a database may be justified later.
-- **Multi-document writes are not atomic as a set.** Each file is written
-  atomically, but a crash partway through `save()` can leave documents
-  inconsistent. `polymation validate` detects it; nothing rolls it back.
-- **No concurrency protection.** Two simultaneous commands against one project
-  can interleave writes. There is no lock file.
-- **CI has not yet completed successfully.** The first run reached the render
-  and produced a conforming file, then failed on a defect in the workflow's own
-  ffprobe assertion step (since fixed). Local and CI validation are reported
-  separately and no claim is made about CI passing until a run goes green.
-
-Full list with detail: [`docs/DEVELOPMENT_STATUS.md`](docs/DEVELOPMENT_STATUS.md) §4.
-
----
+- **Checksum verification cost is unbounded**, being proportional to total media
+  size. `--no-verify-checksums` is the escape hatch.
+- **CI has not yet completed successfully.** The workflow is configured and has
+  run; the first run failed on a defect in its own assertion step, since fixed.
+  Local and CI validation are reported separately and no claim is made about CI
+  passing until a run goes green.
 
 ## Documentation
 
@@ -258,9 +332,11 @@ Full list with detail: [`docs/DEVELOPMENT_STATUS.md`](docs/DEVELOPMENT_STATUS.md
 |---|---|
 | [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md) | Milestone roadmap, M0.1 through M8 |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module structure, storage model, extension points |
+| [`docs/COMPOSITION.md`](docs/COMPOSITION.md) | Timeline authoring, composition operations, audio, profiles, caching, recovery, benchmarks |
 | [`docs/EDITORIAL_STANDARD.md`](docs/EDITORIAL_STANDARD.md) | Editorial principles and accuracy requirements |
 | [`docs/MEDIA_RIGHTS.md`](docs/MEDIA_RIGHTS.md) | Rights policy and how the platform enforces it |
 | [`docs/ACCEPTANCE_CRITERIA.md`](docs/ACCEPTANCE_CRITERIA.md) | M0.1 criteria A01–A24 with evidence |
+| [`docs/ACCEPTANCE_CRITERIA_M02.md`](docs/ACCEPTANCE_CRITERIA_M02.md) | M0.2 criteria B01–B35 with evidence |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | Architectural decisions, with alternatives and consequences |
 | [`docs/DEVELOPMENT_STATUS.md`](docs/DEVELOPMENT_STATUS.md) | Current status, defects, constraints, next action |
 | [`CLAUDE.md`](CLAUDE.md) | Standing instructions for coding agents on this repository |
