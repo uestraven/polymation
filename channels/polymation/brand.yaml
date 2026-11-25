@@ -1,0 +1,29 @@
+# Polymation channel brand configuration.
+#
+# PROVISIONAL. These values are a working starting point, not approved final
+# production artwork. `provisional: true` is surfaced by the CLI so that no
+# render can imply brand sign-off.
+schema_version: "1.0"
+channel_id: polymation
+provisional: true
+
+name: Polymation
+tagline: Where pixels meet animation.
+language: en
+
+palette:
+  crt_amber: "#DDA34B"
+  deep_indigo: "#191D38"
+  parchment_cream: "#EFE3CB"
+  vermilion: "#C94436"
+
+typography:
+  primary_direction: clean geometric sans-serif
+  secondary_direction: subtle serif or pixel-inspired accents
+  proposed_fonts:
+    - family: Space Grotesk
+      role: primary
+    - family: IBM Plex Serif
+      role: secondary
+    - family: Silkscreen
+      role: accent

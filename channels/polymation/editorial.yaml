@@ -1,0 +1,37 @@
+# Polymation channel editorial configuration.
+schema_version: "1.0"
+channel_id: polymation
+
+historical_scope:
+  start_year: 1990
+  end_year: 2009
+
+primary_subjects:
+  - jrpg
+  - anime
+
+durations:
+  standard:
+    min_seconds: 120
+    max_seconds: 300
+  short:
+    min_seconds: 30
+    max_seconds: 60
+
+content_pillars:
+  - id: story_world_deep_dive
+    name: Story and World Deep Dives
+  - id: design_craft_breakdown
+    name: Design and Craft Breakdowns
+  - id: era_spotlight
+    name: Era Spotlights and Comparisons
+  - id: short_form_hook
+    name: Short-Form Hooks
+
+editorial_principles:
+  - curiosity
+  - accuracy
+  - brevity
+  - originality
+  - nostalgia
+  - meaningful_creative_analysis
