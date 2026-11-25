@@ -348,6 +348,53 @@ class SceneCache:
         return removed
 
 
+def compute_assembly_key(
+    scene_digests: list[str],
+    timeline: CompositionTimeline,
+    profile: RenderProfile,
+    *,
+    caption_bytes: bytes | None,
+    ffmpeg_version: str,
+) -> CacheKey:
+    """Content address of the fully assembled output.
+
+    Final assembly has its own cache because it has its own dependencies: it
+    consumes the scene digests, but also the audio mix, the loudness target and
+    the caption text — none of which belong to any single scene. Without this,
+    burning in captions re-encodes the whole video on every render even when
+    nothing changed, because captions alter pixels and so defeat the
+    stream-copy path. See docs/DECISIONS.md D-019.
+    """
+    payload: dict[str, Any] = {
+        # Scene digests rather than scene content: if a scene's own key is
+        # unchanged, its bytes are unchanged.
+        "scenes": list(scene_digests),
+        "audio": timeline.audio.model_dump(mode="json"),
+        "captions": timeline.captions.model_dump(mode="json"),
+        "caption_sha256": (hashlib.sha256(caption_bytes).hexdigest() if caption_bytes else None),
+        "fps": timeline.fps,
+        "total_frames": timeline.total_frames,
+        "profile": profile.cache_identity(),
+        "renderer_version": RENDERER_VERSION,
+        "ffmpeg_version": ffmpeg_version,
+    }
+    digest = hashlib.sha256(_canonical(payload).encode("utf-8")).hexdigest()
+    return CacheKey(scene_id="assembly", digest=digest, payload=payload)
+
+
+class AssemblyCache(SceneCache):
+    """Cache of fully assembled outputs, separate from the scene cache.
+
+    Subclasses :class:`SceneCache` because the store/lookup/validate logic is
+    identical; only the directory differs, which keeps assembly entries from
+    being counted or cleared as scene entries.
+    """
+
+    def __init__(self, project_root: Path, profile: RenderProfile) -> None:
+        super().__init__(project_root, profile)
+        self.root = project_root / CACHE_DIRNAME / "assembly" / profile.name.value
+
+
 def clear_project_cache(project_root: Path) -> int:
     """Delete every cached render for a project, across all profiles.
 

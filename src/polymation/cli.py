@@ -19,6 +19,13 @@ from typing import Annotated, Any, NoReturn
 import typer
 
 from polymation import __version__
+from polymation.cli_render import (
+    cache_app,
+    inspect_command,
+    reference_app,
+    render_command,
+    timeline_app,
+)
 from polymation.config.channel import DEFAULT_CHANNEL_ID, ChannelConfig, load_channel_config
 from polymation.config.paths import Workspace
 from polymation.doctor import run_diagnostics
@@ -61,6 +68,13 @@ demo_app = typer.Typer(help="Build and render the technical demonstration.", no_
 app.add_typer(asset_app, name="asset")
 app.add_typer(rights_app, name="rights")
 app.add_typer(demo_app, name="demo")
+
+# M0.2 composition engine commands, defined in polymation.cli_render.
+app.add_typer(timeline_app, name="timeline")
+app.add_typer(cache_app, name="cache")
+app.add_typer(reference_app, name="reference")
+app.command("render")(render_command)
+app.command("inspect")(inspect_command)
 
 WorkspaceOption = Annotated[
     Path | None,

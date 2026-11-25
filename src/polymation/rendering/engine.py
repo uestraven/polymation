@@ -31,9 +31,11 @@ from polymation.projects.locking import ProjectLock
 from polymation.projects.store import ProjectBundle
 from polymation.rendering.audio import AudioPlan, build_audio_plan
 from polymation.rendering.cache import (
+    AssemblyCache,
     CacheKey,
     CacheStatistics,
     SceneCache,
+    compute_assembly_key,
     compute_scene_key,
 )
 from polymation.rendering.compose import OutputInspection, inspect_output
@@ -68,6 +70,8 @@ class SceneOutcome:
     path: Path
     frames: int
     seconds: float
+    #: The scene's content address, used to key the assembly cache.
+    digest: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-serialisable form."""
@@ -96,6 +100,8 @@ class RenderOutcome:
     #: True when only some scenes were rendered, so the assembled output on
     #: disk does not reflect the whole timeline.
     scene_only: bool = False
+    #: True when the fully assembled output came from the assembly cache.
+    assembly_cached: bool = False
     #: Path to the stale final output when ``scene_only`` left it untouched.
     stale_output_path: Path | None = None
     sidecar_srt_path: Path | None = None
@@ -114,6 +120,7 @@ class RenderOutcome:
             "profile": self.profile.name.value,
             "output_path": str(self.output_path) if self.output_path else None,
             "scene_only": self.scene_only,
+            "assembly_cached": self.assembly_cached,
             "final_assembly_updated": not self.scene_only,
             "stale_output_path": (str(self.stale_output_path) if self.stale_output_path else None),
             "scenes": [scene.to_dict() for scene in self.scenes],
@@ -346,6 +353,10 @@ def _render_or_reuse(
     )
 
     if not force:
+        # Note whether an entry existed *before* looking it up: lookup discards
+        # an entry that fails validation, so checking afterwards would always
+        # find nothing and a corrupt entry would be reported as a plain miss.
+        existed = cache.path_for(key).exists() or cache.metadata_path_for(key).exists()
         entry = cache.lookup(key)
         if entry is not None:
             statistics.hits.append(scene.scene_id)
@@ -355,10 +366,9 @@ def _render_or_reuse(
                 path=entry.path,
                 frames=scene.duration_frames,
                 seconds=0.0,
+                digest=key.digest,
             )
-        # Distinguish "never built" from "built but unusable", because a
-        # corrupt entry is a fact worth reporting rather than a silent miss.
-        if cache.path_for(key).exists() or cache.metadata_path_for(key).exists():
+        if existed:
             statistics.corrupt.append(scene.scene_id)
 
     statistics.misses.append(scene.scene_id)
@@ -387,6 +397,7 @@ def _render_or_reuse(
         path=entry.path,
         frames=scene.duration_frames,
         seconds=elapsed,
+        digest=key.digest,
     )
 
 
@@ -441,6 +452,31 @@ def _assemble(
 
     destination.parent.mkdir(parents=True, exist_ok=True)
 
+    cues = _load_cues(bundle, timeline, profile)
+    caption_bytes = format_srt(cues, fps=profile.fps).encode("utf-8") if cues else None
+
+    # Assembly has its own cache dependencies: the scene digests plus the audio
+    # mix, loudness target and caption text. Without this, burning in captions
+    # re-encodes the whole video every render — captions change pixels, which
+    # defeats the stream-copy path that makes a warm render cheap.
+    assembly_cache = AssemblyCache(bundle.root, profile)
+    assembly_key = compute_assembly_key(
+        [scene.digest for scene in scene_outcomes],
+        timeline,
+        profile,
+        caption_bytes=caption_bytes,
+        ffmpeg_version=ffmpeg.version or "unknown",
+    )
+    cached_assembly = assembly_cache.lookup(assembly_key)
+    if cached_assembly is not None:
+        shutil.copy2(cached_assembly.path, destination)
+        outcome.assembly_cached = True
+        if timeline.captions.export_sidecar and cues:
+            sidecar = destination.with_suffix(".srt")
+            sidecar.write_text(format_srt(cues, fps=profile.fps), encoding="utf-8")
+            outcome.sidecar_srt_path = sidecar
+        return destination
+
     # Concatenate scene intermediates without re-encoding. All scenes share the
     # profile's encoder settings, so a stream copy is exact and fast.
     concat_list = work_root / "scenes.txt"
@@ -473,7 +509,7 @@ def _assemble(
             f"{concat_result.tail()}"
         )
 
-    cues = _load_cues(bundle, timeline, profile)
+    # `cues` was already loaded above, to key the assembly cache.
     if timeline.captions.export_sidecar and cues:
         sidecar = destination.with_suffix(".srt")
         sidecar.write_text(format_srt(cues, fps=profile.fps), encoding="utf-8")
@@ -552,11 +588,23 @@ def _assemble(
             + f"\nThe existing output at {destination} was left untouched."
         )
 
+    # Cache a copy before moving, so a later identical render is a file copy.
+    cache_copy = work_root / f"assembly-cache{profile.container_suffix}"
+    shutil.copy2(final_temp, cache_copy)
+    assembly_cache.store(assembly_key, cache_copy)
+
     shutil.move(str(final_temp), str(destination))
 
-    if timeline.audio.export_stems and audio_plan.stem_labels:
+    if timeline.audio.export_stems and timeline.audio.segments:
         outcome.stem_paths = _export_stems(
-            ffmpeg, audio_plan, video_only, destination, profile, work_root
+            ffmpeg,
+            timeline,
+            profile,
+            asset_paths=asset_paths,
+            assets=assets,
+            video_only=video_only,
+            destination=destination,
+            outcome=outcome,
         )
 
     return destination
@@ -725,18 +773,43 @@ def _encode_final(
 
 def _export_stems(
     ffmpeg: ToolInfo,
-    audio_plan: AudioPlan,
+    timeline: CompositionTimeline,
+    profile: RenderProfile,
+    *,
+    asset_paths: dict[str, Path],
+    assets: dict[str, MediaAsset],
     video_only: Path,
     destination: Path,
-    profile: RenderProfile,
-    work_root: Path,
+    outcome: RenderOutcome,
 ) -> dict[str, Path]:
-    """Write one WAV per audio role alongside the final output."""
+    """Write one WAV per audio role alongside the final output.
+
+    Each stem is rendered from its own single-role graph rather than by mapping
+    a bus label out of the full mix: an FFmpeg filter output may be consumed
+    only once, and the full mix already feeds every bus into ``amix``. Tapping
+    it produced no stems at all, silently, until this was fixed.
+
+    A stem that fails to render is reported as a caution rather than dropped,
+    because a missing stem with no explanation is worse than a loud one.
+    """
     stems: dict[str, Path] = {}
     stem_dir = destination.parent / f"{destination.stem}-stems"
     stem_dir.mkdir(parents=True, exist_ok=True)
 
-    for role, label in audio_plan.stem_labels.items():
+    roles = {segment.role for segment in timeline.audio.segments}
+
+    for role in sorted(roles, key=lambda item: item.value):
+        plan = build_audio_plan(
+            timeline,
+            profile,
+            asset_paths=asset_paths,
+            assets=assets,
+            first_input_index=1,
+            only_roles=frozenset({role}),
+        )
+        if plan.is_silent:
+            continue
+
         stem_path = stem_dir / f"{role.value}.wav"
         arguments = [
             "-nostdin",
@@ -744,20 +817,35 @@ def _export_stems(
             "-y",
             "-i",
             str(video_only),
-            *[argument for group in audio_plan.inputs for argument in group],
+            *[argument for group in plan.inputs for argument in group],
             "-filter_complex",
-            ";".join(audio_plan.chains),
+            ";".join(plan.chains),
             "-map",
-            f"[{label}]",
+            f"[{plan.mix_label}]",
             "-c:a",
             "pcm_s16le",
             "-ar",
             str(profile.audio_sample_rate),
+            "-ac",
+            str(profile.audio_channels),
             str(stem_path),
         ]
         result = run_tool(ffmpeg.path, arguments)  # type: ignore[arg-type]
-        if result.ok:
+        if result.ok and stem_path.is_file() and stem_path.stat().st_size > 0:
             stems[role.value] = stem_path
+        else:
+            outcome.cautions.append(
+                Finding(
+                    severity=Severity.WARNING,
+                    code="stem_export_failed",
+                    message=(
+                        f"The {role.value} stem could not be written "
+                        f"(FFmpeg status {result.returncode}). The mixed output is "
+                        f"unaffected. Last FFmpeg output: {result.tail(4)}"
+                    ),
+                    location=str(stem_path),
+                )
+            )
 
     return stems
 

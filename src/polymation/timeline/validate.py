@@ -294,7 +294,8 @@ def _check_video_source_length(
             "source_clip_too_short",
             f"{detail} The source is never silently looped, frozen or stretched. "
             f"Shorten the shot, reduce the trim, or set short_source_policy to "
-            f"'hold_last_frame' or 'trim_shot' to make the behaviour explicit.",
+            f"'hold_last_frame' or 'pad_with_background' to make the behaviour "
+            f"explicit.",
             location=location,
         )
     else:

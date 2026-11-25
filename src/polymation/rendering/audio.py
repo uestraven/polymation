@@ -195,8 +195,9 @@ def build_audio_plan(
     asset_paths: dict[str, Path],
     assets: dict[str, MediaAsset],
     first_input_index: int,
+    only_roles: frozenset[AudioRole] | None = None,
 ) -> AudioPlan:
-    """Build the inputs and filter chains for the complete audio mix.
+    """Build the inputs and filter chains for the audio mix.
 
     Args:
         timeline: supplies segments, ducking and total length.
@@ -205,6 +206,10 @@ def build_audio_plan(
         assets: asset id to record, for validating types.
         first_input_index: index the first audio input will occupy, so audio
             inputs can follow video inputs in one invocation.
+        only_roles: restrict the mix to these roles. Used to build a stem as
+            its own complete graph — a filter output may be consumed only once,
+            so a stem cannot simply tap the bus label that the full mix already
+            feeds into ``amix``.
 
     Raises:
         RenderError: if a segment's asset is unavailable.
@@ -214,13 +219,19 @@ def build_audio_plan(
     sample_rate = profile.audio_sample_rate
     total_samples = timeline.total_samples
 
-    if not mix.segments:
+    wanted_roles = (
+        tuple(role for role in MIX_ROLE_ORDER if role in only_roles)
+        if only_roles is not None
+        else MIX_ROLE_ORDER
+    )
+
+    if not mix.segments or not any(mix.segments_for(role) for role in wanted_roles):
         return plan
 
     next_index = first_input_index
     role_labels: dict[AudioRole, list[str]] = {role: [] for role in MIX_ROLE_ORDER}
 
-    for role in MIX_ROLE_ORDER:
+    for role in wanted_roles:
         for position, segment in enumerate(mix.segments_for(role)):
             path = asset_paths.get(segment.asset_id)
             if path is None or not path.is_file():
@@ -246,7 +257,7 @@ def build_audio_plan(
 
     # Collapse each role to a single bus, then apply role gain and ducking.
     bus_labels: list[str] = []
-    for role in MIX_ROLE_ORDER:
+    for role in wanted_roles:
         labels = role_labels[role]
         if not labels:
             continue
