@@ -30,10 +30,23 @@ from polymation.rendering.fixtures import (
 
 
 def test_a_missing_font_family_resolves_to_a_declared_fallback() -> None:
+    """A substitute may be used, but it is never presented as the brand font."""
     resolution = resolve_font("ThisFontDefinitelyDoesNotExistAnywhere")
-    assert resolution.path is None
     assert resolution.is_fallback
     assert "NOT the brand font" in resolution.description
+    # The substitute, when one exists, must be a real readable file.
+    if resolution.path is not None:
+        assert resolution.path.is_file()
+
+
+def test_font_lookup_prefers_the_regular_weight_over_styled_variants() -> None:
+    """A substring match must not silently return the bold or italic cut."""
+    found = find_font_file("DejaVuSans")
+    if found is None:
+        pytest.skip("DejaVu Sans is not installed on this host")
+    stem = found.stem.lower()
+    for styled in ("bold", "oblique", "italic", "condensed"):
+        assert styled not in stem, f"picked the {styled} variant: {found}"
 
 
 def test_an_absent_font_is_reported_as_absent() -> None:

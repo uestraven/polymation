@@ -32,6 +32,21 @@ FONT_SEARCH_DIRECTORIES: tuple[Path, ...] = (
 
 FONT_EXTENSIONS = frozenset({".ttf", ".otf", ".ttc"})
 
+#: Substitute families tried, in order, when a requested family is absent.
+#:
+#: Chosen for glyph coverage rather than for looks: all of these carry Latin-1,
+#: Greek and Cyrillic plus common punctuation such as the em dash, which
+#: Pillow's built-in face lacks. A substitute is always reported as a fallback —
+#: it is never treated as the brand font. None of these covers CJK; see
+#: docs/DEVELOPMENT_STATUS.md for that limitation.
+FALLBACK_FONT_FAMILIES: tuple[str, ...] = (
+    "DejaVuSans",
+    "NotoSans-Regular",
+    "LiberationSans-Regular",
+    "NimbusSans-Regular",
+    "FreeSans",
+)
+
 #: Output specification for the technical demonstration.
 DEMO_WIDTH = 1920
 DEMO_HEIGHT = 1080
@@ -80,11 +95,56 @@ def _normalise(name: str) -> str:
     return "".join(character for character in name.lower() if character.isalnum())
 
 
+#: Style suffixes that mark a weight or slant we do not want to pick by
+#: accident. A bare substring match on "dejavusans" otherwise happily returns
+#: DejaVuSans-Bold, so body text silently comes out bold.
+_UNWANTED_STYLE_TOKENS: tuple[str, ...] = (
+    "bold",
+    "italic",
+    "oblique",
+    "light",
+    "thin",
+    "black",
+    "heavy",
+    "medium",
+    "semibold",
+    "extrabold",
+    "condensed",
+    "narrow",
+    "mono",
+)
+
+
+def _match_rank(stem_normalised: str, target: str) -> tuple[int, int]:
+    """Sort key for a candidate font stem. Lower is better.
+
+    Ranks an exact match first, then a plain "regular" variant, then any
+    unstyled match, and only then a styled one — so the regular weight wins
+    over the bold weight of the same family.
+    """
+    if stem_normalised == target:
+        tier = 0
+    elif stem_normalised == f"{target}regular":
+        tier = 1
+    elif not any(token in stem_normalised for token in _UNWANTED_STYLE_TOKENS):
+        tier = 2
+    else:
+        tier = 3
+    # Shorter stems are closer to the plain family name.
+    return (tier, len(stem_normalised))
+
+
 def find_font_file(family: str) -> Path | None:
-    """Return the path of an installed font file matching ``family``, or ``None``."""
+    """Return the path of an installed font file matching ``family``, or ``None``.
+
+    When several files match, the regular weight is preferred over styled
+    variants; see :func:`_match_rank`.
+    """
     target = _normalise(family)
     if not target:
         return None
+
+    best: tuple[tuple[int, int], Path] | None = None
 
     for directory in FONT_SEARCH_DIRECTORIES:
         if not directory.is_dir():
@@ -96,15 +156,48 @@ def find_font_file(family: str) -> Path | None:
         for candidate in candidates:
             if candidate.suffix.lower() not in FONT_EXTENSIONS:
                 continue
-            if target in _normalise(candidate.stem):
-                return candidate
-    return None
+            stem = _normalise(candidate.stem)
+            if target not in stem:
+                continue
+            rank = _match_rank(stem, target)
+            if best is None or rank < best[0]:
+                best = (rank, candidate)
+
+    return None if best is None else best[1]
 
 
 def resolve_font(family: str) -> FontResolution:
-    """Resolve ``family`` to an installed font file, reporting fallback honestly."""
+    """Resolve ``family`` to a usable font file, reporting fallback honestly.
+
+    Resolution order:
+
+    1. the requested family;
+    2. each entry of :data:`FALLBACK_FONT_FAMILIES`, in order;
+    3. nothing — the caller gets ``path=None`` and
+       :func:`load_font` uses Pillow's built-in face.
+
+    Step 2 exists for glyph coverage, not for appearance. Pillow's built-in face
+    carries little beyond ASCII, so an em dash, an accented vowel or a Japanese
+    title renders as a tofu box. DejaVu Sans and friends cover Latin-1, Greek
+    and Cyrillic, which materially improves text that a channel about Japanese
+    media will actually need.
+
+    A substitute is **always** reported as a fallback. ``is_fallback`` stays
+    true and :attr:`FontResolution.description` still says "NOT the brand font",
+    so a wider substitute never implies brand fidelity.
+    """
     found = find_font_file(family)
-    return FontResolution(requested_family=family, path=found, is_fallback=found is None)
+    if found is not None:
+        return FontResolution(requested_family=family, path=found, is_fallback=False)
+
+    for candidate_family in FALLBACK_FONT_FAMILIES:
+        if _normalise(candidate_family) == _normalise(family):
+            continue
+        candidate = find_font_file(candidate_family)
+        if candidate is not None:
+            return FontResolution(requested_family=family, path=candidate, is_fallback=True)
+
+    return FontResolution(requested_family=family, path=None, is_fallback=True)
 
 
 def load_font(resolution: FontResolution, size: int) -> ImageFont.FreeTypeFont:
