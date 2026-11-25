@@ -15,7 +15,8 @@
 - `uv.lock` with 21 packages, each pinned by sha256. `pip`-based fallback also
   supported; `scripts/bootstrap.sh` handles either.
 - Ruff lint + format configuration; pytest configuration with an `ffmpeg` marker.
-- GitHub Actions workflow — **configured, never run** (see §4).
+- GitHub Actions workflow — **configured; one run so far, which failed on a
+  defect in the workflow itself, now fixed** (see §4, G-1).
 
 ### Channel configuration
 - `channels/polymation/brand.yaml` — palette, tagline, typography direction,
@@ -131,11 +132,27 @@ No known defects — no test fails and no command misbehaves. The following are
 **real gaps**, not deferred polish, and should be read as limitations of what
 was delivered.
 
-### G-1 — CI has never run
-`.github/workflows/ci.yml` is configured and reviewed but has **never
-executed**. There is no remote repository, and creating one was not authorized.
-Nothing in this repository's documentation claims CI passes. The workflow
-remains unverified until a remote exists and a run completes.
+### G-1 — CI has not completed successfully yet
+`origin` is configured (`github.com/uestraven/polymation`) and the workflow has
+run once, on 2026-11-25. Every step up to and including the render succeeded,
+and the render produced a conforming file — the run log shows `1920x1080`,
+`30/1`, `h264`, `aac`, `48000`, `15.000000`.
+
+The run then **failed** on the "Assert the output matches the M0.1
+specification" step, from a defect in the workflow rather than in the
+application: `ffprobe -show_entries stream=width,height,r_frame_rate,codec_name`
+returns fields in ffprobe's own field order, not the requested order, so a
+positional `read` bound each value to the wrong variable and the step reported
+`width is h264`.
+
+Fixed by issuing one ffprobe call per field, eliminating the ordering
+dependence; the step now also asserts pixel format and channel count. The
+corrected logic was extracted from the workflow and run against the real
+rendered file locally — it reports conformance and exits 0.
+
+**No green CI run has occurred.** Nothing in this repository's documentation
+claims CI passes, and the workflow stays unverified until a run completes
+successfully.
 
 ### G-2 — Local validation used Python 3.11, not the pinned 3.12
 `.python-version` pins 3.12 and CI installs it, but all local evidence came
@@ -213,7 +230,7 @@ proportional to total media size; with hours of footage this will be slow.
 | uv absent | **Resolved** — uv 0.13.10 installed user-local via pipx with owner approval |
 | `curl \| sh` installers blocked by the agent sandbox | Worked around with pipx |
 | glibc 2.26 vs `manylinux_2_28` wheels | Documented, not resolved (G-2) |
-| No GitHub remote | Documented; creating one needs authorization (G-1) |
+| No GitHub remote | **Resolved** — `origin` added on owner instruction; not pushed by the agent (G-1) |
 | Brand fonts not installed | Documented and reported at runtime (G-4) |
 
 Installs performed, both user-local and without sudo, each with the owner's
@@ -247,7 +264,8 @@ free and open-source. No runtime network access exists anywhere in `src/`.
    not self-approved, and that no command creates approvals (G-3).
 3. Whether to acquire licensed brand fonts, or choose families that are reliably
    available (G-4), before M0.3.
-4. Whether to create a remote repository so CI can actually run (G-1).
+4. Re-running CI now that the workflow's assertion step is fixed, to obtain
+   the first green run (G-1).
 
 M0.2 must not be started until that review is complete and authorization is
 given.

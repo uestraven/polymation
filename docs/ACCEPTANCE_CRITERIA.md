@@ -4,9 +4,12 @@
 **Verdict:** 24 of 24 PASS. No criterion is FAIL, PARTIAL or NOT EXECUTED.
 
 **Important caveat on every result below:** this is **local** validation only.
-The GitHub Actions workflow is configured but **has never run** — there is no
-remote repository. Any criterion whose evidence is a CI run is therefore marked
-as configuration-only, and said so explicitly. See `docs/DEVELOPMENT_STATUS.md`.
+The GitHub Actions workflow **has not yet completed successfully**. Its first
+run (2026-11-25, after `origin` was added) reached the render step and produced
+a conforming file, then failed on a defect in the workflow's own ffprobe
+assertion step — now fixed. Any criterion whose evidence would be a CI run is
+therefore marked as configuration-only, and said so explicitly. See
+`docs/DEVELOPMENT_STATUS.md`.
 
 Local environment used for all evidence:
 
@@ -387,23 +390,38 @@ blanket suppressions: the only `# noqa` comments are four in
 `rendering/ffmpeg.py` explaining why deliberate, non-shell subprocess use is
 not the risk S404/S603 describe, and two internal invariant asserts.
 
-## A20 — CI configuration established · **PASS (configuration only — never run)**
+## A20 — CI configuration established · **PASS (configuration only — no green run yet)**
 
 `.github/workflows/ci.yml` installs uv, installs the pinned Python from
 `.python-version`, installs FFmpeg via apt, runs `uv sync --frozen`, runs
 `polymation doctor`, `ruff check`, `ruff format --check`, the full test suite
 with a JUnit report, then builds and renders the demonstration and asserts
-every output property with ffprobe (resolution, frame rate, both codecs,
-sample rate, duration within 14.5–15.5 s). It uploads the rendered MP4 as an
-artifact.
+every output property with ffprobe (resolution, frame rate, pixel format, both
+codecs, sample rate, channel count, duration within 14.5–15.5 s). It uploads
+the rendered MP4 as an artifact.
 
 It also includes a step that **fails the build if any FFmpeg-marked test was
 skipped**, so a silently-skipped render cannot pass CI.
 
-**This workflow has never executed.** There is no remote repository, and
-creating one was not authorized. The criterion is satisfied as *configuration
-established*; it is explicitly **not** evidence that CI passes. Nothing in this
-report claims otherwise.
+**Run history.** The first run executed on 2026-11-25 once `origin` was
+configured. Every step up to and including the render succeeded, and the render
+produced a conforming file — the run's own log shows `1920x1080`, `30/1`,
+`h264`, `aac`, `48000`, `15.000000`. The run then **failed** on the
+"Assert the output matches the M0.1 specification" step, due to a defect in the
+workflow, not in the application: `ffprobe -show_entries
+stream=width,height,r_frame_rate,codec_name` returns fields in ffprobe's own
+field order rather than the requested order, so a positional `read` bound every
+value to the wrong variable (reporting `width is h264`).
+
+Fixed by issuing one ffprobe call per field, which removes the ordering
+dependence; the step now also checks pixel format and channel count. The
+corrected logic was extracted from the workflow and executed against the real
+rendered file locally: it prints `Output conforms to the M0.1 specification.`
+and exits 0.
+
+The criterion is satisfied as *configuration established*. It is explicitly
+**not** evidence that CI passes, and **no green run has occurred yet**. Nothing
+in this report claims otherwise.
 
 ## A21 — Documentation completed · **PASS**
 
@@ -472,8 +490,9 @@ run; local validation used Python 3.11 rather than the pinned 3.12.
 
 Two qualifications that are **not** downgrades but must be read with the table:
 
-1. **A20 is configuration only.** The CI workflow has never run. No claim is
-   made about CI passing.
+1. **A20 is configuration only.** CI has run once and failed, on a defect in
+   the workflow's own assertion step rather than in the application; that defect
+   is fixed but no green run has happened yet. No claim is made about CI passing.
 2. **A03 and A18 evidence came from Python 3.11.4, not the pinned 3.12.** The
    host's glibc blocks the pinned interpreter from installing Pillow wheels.
    CI covers 3.12; local results are not evidence about it.

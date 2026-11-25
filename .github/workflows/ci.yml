@@ -100,27 +100,53 @@ jobs:
       - name: Assert the output matches the M0.1 specification
         run: |
           OUTPUT=projects/demo-technical-fixture/output/demo-technical-fixture.mp4
-          read -r WIDTH HEIGHT RATE VCODEC <<<"$(ffprobe -v error -select_streams v:0 \
-            -show_entries stream=width,height,r_frame_rate,codec_name \
-            -of default=nw=1:nk=1 "$OUTPUT" | tr '\n' ' ')"
-          read -r ACODEC ARATE <<<"$(ffprobe -v error -select_streams a:0 \
-            -show_entries stream=codec_name,sample_rate \
-            -of default=nw=1:nk=1 "$OUTPUT" | tr '\n' ' ')"
-          DURATION=$(ffprobe -v error -show_entries format=duration \
-            -of default=nw=1:nk=1 "$OUTPUT")
 
-          echo "resolution=${WIDTH}x${HEIGHT} fps=${RATE} video=${VCODEC}"
-          echo "audio=${ACODEC} sample_rate=${ARATE} duration=${DURATION}"
+          # One ffprobe call per field. Asking for several entries at once
+          # returns them in ffprobe's own field order, not the order requested,
+          # so a positional read would silently mix the values up.
+          probe_stream() { # probe_stream <stream-selector> <field>
+            ffprobe -v error -select_streams "$1" -show_entries "stream=$2" \
+              -of default=nw=1:nk=1 "$OUTPUT" | head -n 1
+          }
+
+          WIDTH=$(probe_stream v:0 width)
+          HEIGHT=$(probe_stream v:0 height)
+          RATE=$(probe_stream v:0 r_frame_rate)
+          VCODEC=$(probe_stream v:0 codec_name)
+          PIXFMT=$(probe_stream v:0 pix_fmt)
+          ACODEC=$(probe_stream a:0 codec_name)
+          ARATE=$(probe_stream a:0 sample_rate)
+          ACHANNELS=$(probe_stream a:0 channels)
+          DURATION=$(ffprobe -v error -show_entries format=duration \
+            -of default=nw=1:nk=1 "$OUTPUT" | head -n 1)
+
+          echo "resolution=${WIDTH}x${HEIGHT} fps=${RATE} video=${VCODEC} pix_fmt=${PIXFMT}"
+          echo "audio=${ACODEC} sample_rate=${ARATE} channels=${ACHANNELS}"
+          echo "duration=${DURATION}"
 
           FAILED=0
-          [ "$WIDTH"  = "1920" ]  || { echo "::error::width is $WIDTH, expected 1920"; FAILED=1; }
-          [ "$HEIGHT" = "1080" ]  || { echo "::error::height is $HEIGHT, expected 1080"; FAILED=1; }
-          [ "$RATE"   = "30/1" ]  || { echo "::error::frame rate is $RATE, expected 30/1"; FAILED=1; }
-          [ "$VCODEC" = "h264" ]  || { echo "::error::video codec is $VCODEC, expected h264"; FAILED=1; }
-          [ "$ACODEC" = "aac" ]   || { echo "::error::audio codec is $ACODEC, expected aac"; FAILED=1; }
-          [ "$ARATE"  = "48000" ] || { echo "::error::sample rate is $ARATE, expected 48000"; FAILED=1; }
+          expect() { # expect <label> <actual> <wanted>
+            if [ "$2" != "$3" ]; then
+              echo "::error::$1 is '$2', expected '$3'"
+              FAILED=1
+            fi
+          }
+
+          expect width "$WIDTH" 1920
+          expect height "$HEIGHT" 1080
+          expect "frame rate" "$RATE" 30/1
+          expect "video codec" "$VCODEC" h264
+          expect "pixel format" "$PIXFMT" yuv420p
+          expect "audio codec" "$ACODEC" aac
+          expect "audio sample rate" "$ARATE" 48000
+          expect "audio channels" "$ACHANNELS" 2
+
           awk -v d="$DURATION" 'BEGIN { exit !(d > 14.5 && d < 15.5) }' \
             || { echo "::error::duration is ${DURATION}s, expected about 15s"; FAILED=1; }
+
+          if [ "$FAILED" -eq 0 ]; then
+            echo "Output conforms to the M0.1 specification."
+          fi
           exit $FAILED
 
       - name: Validate the demonstration project

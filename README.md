@@ -226,9 +226,10 @@ These are real gaps, not deferred polish:
   inconsistent. `polymation validate` detects it; nothing rolls it back.
 - **No concurrency protection.** Two simultaneous commands against one project
   can interleave writes. There is no lock file.
-- **CI has never run.** The workflow is configured but there is no remote
-  repository, so it is unverified. Local and CI validation are reported
-  separately and no claim is made about CI passing.
+- **CI has not yet completed successfully.** The first run reached the render
+  and produced a conforming file, then failed on a defect in the workflow's own
+  ffprobe assertion step (since fixed). Local and CI validation are reported
+  separately and no claim is made about CI passing until a run goes green.
 
 Full list with detail: [`docs/DEVELOPMENT_STATUS.md`](docs/DEVELOPMENT_STATUS.md) §4.
 
