@@ -287,7 +287,12 @@ def _compile_audio(
             f"other arrangement."
         )
 
-    for index, (scene, asset_id) in enumerate(zip(scenes, narration_asset_ids, strict=True)):
+    # No narration supplied is the normal case for a freshly compiled timeline;
+    # zipping strictly against an empty list would raise instead of placing
+    # nothing.
+    for index, (scene, asset_id) in enumerate(
+        zip(scenes, narration_asset_ids, strict=True) if narration_asset_ids else []
+    ):
         duration_seconds = require_audio(asset_id, f"narration for scene {scene.scene_id!r}")
         samples, applied = seconds_to_samples(
             duration_seconds,

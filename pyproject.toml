@@ -50,7 +50,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"] # asserts are the point of a test suite
+# Asserts are the point of a test suite. S108 flags "/tmp/..." literals,
+# which several graph tests use as synthetic path strings that are never
+# opened — the assertion is about the generated filter text, not the file.
+"tests/*" = ["S101", "S108"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

@@ -265,7 +265,7 @@ def test_import_rejects_a_destination_name_that_escapes_via_traversal(
     with pytest.raises(UnsafePathError):
         import_asset(project, png_file, destination_name="../../../../../../tmp/pwned.png")
 
-    assert not (Path("/tmp") / "pwned.png").exists()  # noqa: S108
+    assert not (Path("/tmp") / "pwned.png").exists()
 
 
 def test_audio_import_defaults_to_the_music_directory(
